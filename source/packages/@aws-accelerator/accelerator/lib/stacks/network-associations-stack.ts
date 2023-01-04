@@ -13,41 +13,62 @@
 
 import * as cdk from 'aws-cdk-lib';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import { NagSuppressions } from 'cdk-nag';
 import { pascalCase } from 'change-case';
 import { Construct } from 'constructs';
 
 import {
   AccountsConfig,
+  ApplicationLoadBalancerListenerConfig,
+  CustomerGatewayConfig,
   DxGatewayConfig,
   DxTransitGatewayAssociationConfig,
+  ManagedActiveDirectoryConfig,
   NetworkConfigTypes,
+  NlbTargetTypeConfig,
   ShareTargets,
+  TargetGroupItemConfig,
   TransitGatewayConfig,
   TransitGatewayRouteEntryConfig,
   TransitGatewayRouteTableConfig,
   VpcConfig,
   VpcTemplatesConfig,
+  VpnConnectionConfig,
 } from '@aws-accelerator/config';
 import {
+  ActiveDirectory,
+  ActiveDirectoryResolverRule,
+  ActiveDirectoryConfiguration,
   AssociateHostedZones,
+  CrossAccountRouteFramework,
   DirectConnectGatewayAssociation,
   DirectConnectGatewayAssociationProps,
+  NLBAddresses,
   PutSsmParameter,
   QueryLoggingConfigAssociation,
   ResolverFirewallRuleGroupAssociation,
   ResolverRuleAssociation,
+  ShareActiveDirectory,
   ShareSubnetTags,
   SsmParameterLookup,
+  SubnetIdLookup,
+  TargetGroup,
   TransitGatewayAttachment,
+  TransitGatewayAttachmentType,
   TransitGatewayPrefixListReference,
   TransitGatewayRouteTableAssociation,
   TransitGatewayRouteTablePropagation,
   TransitGatewayStaticRoute,
   VpcPeering,
+  VpcIdLookup,
+  UserDataScriptsType,
+  KeyLookup,
+  albListenerActionProperty,
 } from '@aws-accelerator/constructs';
 
 import { Logger } from '../logger';
 import { AcceleratorStack, AcceleratorStackProps } from './accelerator-stack';
+import path from 'path';
 
 interface Peering {
   name: string;
@@ -59,90 +80,551 @@ interface Peering {
 export class NetworkAssociationsStack extends AcceleratorStack {
   private accountsConfig: AccountsConfig;
   private cloudwatchKey: cdk.aws_kms.Key;
+  private lambdaKey: cdk.aws_kms.IKey;
   private logRetention: number;
   private dnsFirewallMap: Map<string, string>;
   private dxGatewayMap: Map<string, string>;
+  private peeringList: Peering[];
   private prefixListMap: Map<string, string>;
   private queryLogMap: Map<string, string>;
   private resolverRuleMap: Map<string, string>;
+  private routeTableMap: Map<string, string>;
   private transitGateways: Map<string, string>;
   private transitGatewayRouteTables: Map<string, string>;
   private transitGatewayAttachments: Map<string, string>;
+  private crossAcctRouteProvider?: cdk.custom_resources.Provider;
 
   constructor(scope: Construct, id: string, props: AcceleratorStackProps) {
     super(scope, id, props);
+    try {
+      // Set private properties
+      this.accountsConfig = props.accountsConfig;
+      this.logRetention = props.globalConfig.cloudwatchLogRetentionInDays;
+      this.dnsFirewallMap = new Map<string, string>();
+      this.dxGatewayMap = new Map<string, string>();
+      this.queryLogMap = new Map<string, string>();
+      this.resolverRuleMap = new Map<string, string>();
+      this.transitGateways = new Map<string, string>();
+      this.transitGatewayAttachments = new Map<string, string>();
+      this.transitGatewayRouteTables = new Map<string, string>();
 
-    // Set private properties
-    this.accountsConfig = props.accountsConfig;
-    this.logRetention = props.globalConfig.cloudwatchLogRetentionInDays;
-    this.dnsFirewallMap = new Map<string, string>();
-    this.dxGatewayMap = new Map<string, string>();
-    this.prefixListMap = new Map<string, string>();
-    this.queryLogMap = new Map<string, string>();
-    this.resolverRuleMap = new Map<string, string>();
-    this.transitGateways = new Map<string, string>();
-    this.transitGatewayAttachments = new Map<string, string>();
-    this.transitGatewayRouteTables = new Map<string, string>();
-
-    this.cloudwatchKey = cdk.aws_kms.Key.fromKeyArn(
-      this,
-      'AcceleratorGetCloudWatchKey',
-      cdk.aws_ssm.StringParameter.valueForStringParameter(
+      this.cloudwatchKey = cdk.aws_kms.Key.fromKeyArn(
         this,
-        AcceleratorStack.ACCELERATOR_CLOUDWATCH_LOG_KEY_ARN_PARAMETER_NAME,
-      ),
-    ) as cdk.aws_kms.Key;
+        'AcceleratorGetCloudWatchKey',
+        cdk.aws_ssm.StringParameter.valueForStringParameter(
+          this,
+          AcceleratorStack.ACCELERATOR_CLOUDWATCH_LOG_KEY_ARN_PARAMETER_NAME,
+        ),
+      ) as cdk.aws_kms.Key;
 
-    //
-    // Build prefix list map
-    //
-    this.setPrefixListMap(props);
+      this.lambdaKey = cdk.aws_kms.Key.fromKeyArn(
+        this,
+        'AcceleratorGetLambdaKey',
+        cdk.aws_ssm.StringParameter.valueForStringParameter(
+          this,
+          AcceleratorStack.ACCELERATOR_LAMBDA_KEY_ARN_PARAMETER_NAME,
+        ),
+      );
 
-    //
-    // Create transit gateway route table associations, propagations,
-    // for VPC attachments
-    //
-    this.createTransitGatewayResources(props);
+      //
+      // Build VPC peering list
+      //
+      this.peeringList = this.setPeeringList();
 
-    //
-    // Create Route 53 private hosted zone associations
-    //
-    this.createHostedZoneAssociations();
+      //
+      // Create cross-account peering route provider, if required
+      //
+      this.crossAcctRouteProvider = this.createCrossAcctRouteProvider();
 
-    //
-    // Create central network service VPC associations
-    //
-    this.createCentralNetworkAssociations(props);
+      //
+      // Build prefix list map
+      //
+      this.prefixListMap = this.setPrefixListMap(props);
 
-    //
-    // Create VPC peering connections
-    //
-    this.createVpcPeeringConnections();
+      //
+      // Build route table map
+      //
+      this.routeTableMap = this.setRouteTableMap(props);
 
-    //
-    // Create Direct Connect resources
-    //
-    this.createDirectConnectResources(props);
+      //
+      // Create transit gateway route table associations, propagations,
+      // for VPC and VPN attachments
+      //
+      this.createTransitGatewayResources(props);
 
-    //
-    // Create transit gateway static routes, blackhole
-    // routes, and prefix list references
-    //
-    this.createTransitGatewayStaticRoutes(props);
+      //
+      // Create Route 53 private hosted zone associations
+      //
+      this.createHostedZoneAssociations();
 
-    //
-    // Apply tags to shared VPC/subnet resources
-    //
-    this.shareSubnetTags();
+      //
+      // Create central network service VPC associations
+      //
+      this.createCentralNetworkAssociations(props);
 
-    Logger.info('[network-associations-stack] Completed stack synthesis');
+      //
+      // Create VPC peering connections
+      //
+      this.createVpcPeeringConnections();
+
+      //
+      // Create Direct Connect resources
+      //
+      this.createDirectConnectResources(props);
+
+      //
+      // Create transit gateway static routes, blackhole
+      // routes, and prefix list references
+      //
+      this.createTransitGatewayStaticRoutes(props);
+
+      //
+      // Creates target groups for ALBs and NLBs
+      //
+      const targetGroupMap = this.createIpAndInstanceTargetGroups();
+
+      //
+      // Creates ALB Listeners
+      //
+      const albListenerMap = this.createAlbListeners(targetGroupMap);
+
+      //
+      // Create ALB target Groups after ALB listeners have been created
+      //
+      const albTargetGroupMap = this.createAlbTargetGroups(albListenerMap);
+
+      //
+      // Create NLB Listeners
+      //
+      const allTargetGroupsMap = new Map([...targetGroupMap, ...albTargetGroupMap]);
+      this.createNlbListeners(allTargetGroupsMap);
+
+      //
+      // Apply tags to shared VPC/subnet resources
+      //
+      this.shareSubnetTags();
+
+      //
+      // Create SSM parameters
+      //
+      this.createSsmParameters();
+      // Create managed active directories
+      //
+      this.createManagedActiveDirectories();
+
+      Logger.info('[network-associations-stack] Completed stack synthesis');
+    } catch (err) {
+      Logger.error(`[network-associations-stack] ${err}`);
+      throw err;
+    }
+  }
+
+  private createNlbListeners(targetGroupMap: Map<string, TargetGroup>) {
+    for (const vpcItem of [...this.props.networkConfig.vpcs, ...(this.props.networkConfig.vpcTemplates ?? [])] ?? []) {
+      const vpcAccountIds = this.getVpcAccountIds(vpcItem);
+      if (vpcAccountIds.includes(cdk.Stack.of(this).account) && vpcItem.region === cdk.Stack.of(this).region) {
+        for (const nlbItem of vpcItem.loadBalancers?.networkLoadBalancers ?? []) {
+          const nlbId = cdk.aws_ssm.StringParameter.valueForStringParameter(
+            this,
+            `/accelerator/network/vpc/${vpcItem.name}/nlb/${nlbItem.name}/id`,
+          );
+          for (const listener of nlbItem.listeners ?? []) {
+            const targetGroup = targetGroupMap.get(`${vpcItem.name}-${listener.targetGroup}`);
+            if (!targetGroup) {
+              throw new Error(
+                `The Listener ${listener.name} contains an invalid target group name ${listener.targetGroup} please ensure that the the target group name references a valid target group`,
+              );
+            }
+            new cdk.aws_elasticloadbalancingv2.CfnListener(
+              this,
+              pascalCase(`Listener${vpcItem.name}${nlbItem.name}${listener.name}`),
+              {
+                defaultActions: [
+                  {
+                    type: 'forward',
+                    forwardConfig: {
+                      targetGroups: [
+                        {
+                          targetGroupArn: targetGroup.targetGroupArn,
+                        },
+                      ],
+                    },
+                    targetGroupArn: targetGroup.targetGroupArn,
+                  },
+                ],
+                loadBalancerArn: nlbId,
+                alpnPolicy: [listener.alpnPolicy!],
+                certificates: [{ certificateArn: this.getCertificate(listener.certificate) }],
+                port: listener.port!,
+                protocol: listener.protocol!,
+                sslPolicy: listener.sslPolicy!,
+              },
+            );
+          }
+        }
+      }
+    }
+  }
+
+  private createAlbTargetGroups(albListenerMap: Map<string, cdk.aws_elasticloadbalancingv2.CfnListener>) {
+    const targetGroupMap = new Map<string, TargetGroup>();
+    for (const vpcItem of [...this.props.networkConfig.vpcs, ...(this.props.networkConfig.vpcTemplates ?? [])] ?? []) {
+      const vpcAccountIds = this.getVpcAccountIds(vpcItem);
+      if (vpcAccountIds.includes(cdk.Stack.of(this).account) && vpcItem.region === cdk.Stack.of(this).region) {
+        const vpcId = cdk.aws_ssm.StringParameter.valueForStringParameter(
+          this,
+          `/accelerator/network/vpc/${vpcItem.name}/id`,
+        );
+        const albTargetGroups = vpcItem.targetGroups?.filter(targetGroup => targetGroup.type === 'alb') ?? [];
+        const albNames = vpcItem.loadBalancers?.applicationLoadBalancers?.map(alb => alb.name) ?? [];
+        // alb listeners must be created before targeting an alb
+        for (const targetGroupItem of albTargetGroups) {
+          const updatedTargets = targetGroupItem.targets?.map(target => {
+            if (albNames.includes(target as string)) {
+              return cdk.aws_ssm.StringParameter.valueForStringParameter(
+                this,
+                `/accelerator/network/vpc/${vpcItem.name}/alb/${target}/id`,
+              );
+            }
+            return target;
+          }) as string[];
+
+          const targetGroup = new TargetGroup(this, pascalCase(`TargetGroup${targetGroupItem.name}`), {
+            name: targetGroupItem.name,
+            port: targetGroupItem.port,
+            protocol: targetGroupItem.protocol,
+            protocolVersion: targetGroupItem.protocolVersion! || undefined,
+            type: targetGroupItem.type,
+            attributes: targetGroupItem.attributes ?? undefined,
+            healthCheck: targetGroupItem.healthCheck ?? undefined,
+            threshold: targetGroupItem.threshold ?? undefined,
+            matcher: targetGroupItem.matcher ?? undefined,
+            targets: updatedTargets,
+            vpc: vpcId,
+          });
+          for (const [key, value] of albListenerMap.entries()) {
+            if (key.startsWith(vpcItem.name)) {
+              targetGroup.node.addDependency(value);
+            }
+          }
+          targetGroupMap.set(`${vpcItem.name}-${targetGroupItem.name}`, targetGroup);
+        }
+      }
+    }
+    return targetGroupMap;
+  }
+
+  private createAlbListeners(targetGroupMap: Map<string, TargetGroup>) {
+    try {
+      const listenerMap = new Map<string, cdk.aws_elasticloadbalancingv2.CfnListener>();
+      for (const vpcItem of [...this.props.networkConfig.vpcs, ...(this.props.networkConfig.vpcTemplates ?? [])] ??
+        []) {
+        const vpcAccountIds = this.getVpcAccountIds(vpcItem);
+
+        if (vpcAccountIds.includes(cdk.Stack.of(this).account) && vpcItem.region === cdk.Stack.of(this).region) {
+          for (const albItem of vpcItem.loadBalancers?.applicationLoadBalancers ?? []) {
+            const albArn = cdk.aws_ssm.StringParameter.valueForStringParameter(
+              this,
+              `/accelerator/network/vpc/${vpcItem.name}/alb/${albItem.name}/id`,
+            );
+            for (const listener of albItem.listeners ?? []) {
+              const targetGroup = targetGroupMap.get(`${vpcItem.name}-${listener.targetGroup}`);
+              if (!targetGroup) {
+                throw new Error(
+                  `The Listener ${listener.name} contains an invalid target group name ${listener.targetGroup} please ensure that the the target group name references a valid target group`,
+                );
+              }
+              const listenerAction: cdk.aws_elasticloadbalancingv2.CfnListener.ActionProperty = this.getListenerAction(
+                listener,
+                targetGroup.targetGroupArn,
+              );
+              const listenerResource = new cdk.aws_elasticloadbalancingv2.CfnListener(
+                this,
+                pascalCase(`Listener${vpcItem.name}${albItem.name}${listener.name}`),
+                {
+                  defaultActions: [listenerAction],
+                  loadBalancerArn: albArn,
+                  certificates: [{ certificateArn: this.getCertificate(listener.certificate) }],
+                  port: listener.port!,
+                  protocol: listener.protocol!,
+                  sslPolicy: listener.sslPolicy!,
+                },
+              );
+              listenerMap.set(`${vpcItem.name}-${albItem.name}-${listener.name}`, listenerResource);
+            }
+          }
+        }
+      }
+      return listenerMap;
+    } catch (err) {
+      console.log(err);
+      throw err;
+    }
+  }
+  private getCertificate(certificate: string | undefined) {
+    if (certificate) {
+      //check if user provided arn. If so do nothing, if not get it from ssm
+      if (certificate.match('\\arn:*')) {
+        return certificate;
+      } else {
+        return cdk.aws_ssm.StringParameter.valueForStringParameter(this, `/accelerator/acm/${certificate}/arn`);
+      }
+    }
+    return undefined;
+  }
+
+  private getListenerAction(
+    listener: ApplicationLoadBalancerListenerConfig,
+    targetGroupArn: string,
+  ): cdk.aws_elasticloadbalancingv2.CfnListener.ActionProperty {
+    const listenerTargetGroupArn = targetGroupArn;
+    const actionValues: albListenerActionProperty = {
+      type: listener.type,
+      order: listener.order,
+      targetGroupArn: listenerTargetGroupArn,
+    };
+    if (listener.type === 'forward') {
+      actionValues.forwardConfig = {
+        targetGroups: [{ targetGroupArn: targetGroupArn }],
+        targetGroupStickinessConfig: listener.forwardConfig?.targetGroupStickinessConfig ?? undefined,
+      };
+    } else if (listener.type === 'redirect') {
+      if (listener.redirectConfig) {
+        actionValues.redirectConfig = {
+          host: listener.redirectConfig.host ?? undefined,
+          path: listener.redirectConfig.path ?? undefined,
+          port: listener.redirectConfig.port?.toString() ?? undefined,
+          protocol: listener.redirectConfig.protocol ?? undefined,
+          query: listener.redirectConfig.query ?? undefined,
+          statusCode: listener.redirectConfig.statusCode ?? undefined,
+        };
+      } else {
+        throw new Error(`Listener ${listener.name} is set to redirect but redirectConfig is not defined`);
+      }
+    } else if (listener.type === 'fixed-response') {
+      if (listener.fixedResponseConfig) {
+        actionValues.fixedResponseConfig = {
+          contentType: listener.fixedResponseConfig.contentType ?? undefined,
+          messageBody: listener.fixedResponseConfig.messageBody ?? undefined,
+          statusCode: listener.fixedResponseConfig.statusCode ?? undefined,
+        };
+      } else {
+        throw new Error(`Listener ${listener.name} is set to fixed-response but fixedResponseConfig is not defined`);
+      }
+    } else {
+      throw new Error(`Listener ${listener.name} is not set to forward, fixed-response or redirect`);
+    }
+
+    return actionValues as cdk.aws_elasticloadbalancingv2.CfnListener.ActionProperty;
+  }
+  /**
+   * Create Ip based target group
+   */
+  private createIpTargetGroup(
+    targetGroupItem: TargetGroupItemConfig,
+    vpcItem: VpcConfig | VpcTemplatesConfig,
+    vpcId: string,
+  ) {
+    try {
+      //Get NLB Targets in Ip Targets for lookup
+      const nlbTargets = targetGroupItem.targets?.filter(target => {
+        return typeof target !== 'string';
+      }) as NlbTargetTypeConfig[];
+      //Set AccountIds for lookup Custom Resource
+      const nlbTargetsWithAccountIds =
+        (nlbTargets.map(nlbTarget => {
+          const accountId = this.props.accountsConfig.getAccountId(nlbTarget.account);
+          return {
+            account: accountId,
+            region: nlbTarget.region,
+            nlbName: nlbTarget.nlbName,
+          };
+        }) as NlbTargetTypeConfig[]) ?? [];
+
+      //Get targets containing an IP Address only
+      const staticIpTargets: (NlbTargetTypeConfig | string)[] =
+        (targetGroupItem.targets?.filter(target => typeof target === 'string') as string[]) ?? [];
+      // If NLB targets exist, send both static ips and NLB targets to custom resource to create one entry for the target group
+      if (nlbTargetsWithAccountIds && nlbTargetsWithAccountIds.length > 0) {
+        const nlbAddresses = new NLBAddresses(this, `${targetGroupItem.name}-ipLookup`, {
+          targets: [...nlbTargetsWithAccountIds, ...staticIpTargets],
+          assumeRoleName: 'AWSAccelerator-GetNLBIPAddressLookup',
+          partition: cdk.Stack.of(this).partition,
+          kmsKey: this.cloudwatchKey,
+          logRetentionInDays: this.logRetention,
+        });
+        return new TargetGroup(this, `${vpcItem.name}-${targetGroupItem.name}`, {
+          name: targetGroupItem.name,
+          port: targetGroupItem.port,
+          protocol: targetGroupItem.protocol,
+          protocolVersion: targetGroupItem.protocolVersion,
+          type: targetGroupItem.type,
+          attributes: targetGroupItem.attributes,
+          healthCheck: targetGroupItem.healthCheck,
+          threshold: targetGroupItem.threshold,
+          matcher: targetGroupItem.matcher,
+          targets: nlbAddresses.ipAddresses,
+          vpc: vpcId,
+        });
+      } else {
+        // If only IP addresses exist, skip CR Lookup and make the target group directly
+        return new TargetGroup(this, `${vpcItem.name}-${targetGroupItem.name}`, {
+          name: targetGroupItem.name,
+          port: targetGroupItem.port,
+          protocol: targetGroupItem.protocol,
+          protocolVersion: targetGroupItem.protocolVersion,
+          type: targetGroupItem.type,
+          attributes: targetGroupItem.attributes,
+          healthCheck: targetGroupItem.healthCheck,
+          threshold: targetGroupItem.threshold,
+          matcher: targetGroupItem.matcher,
+          targets: staticIpTargets as string[],
+          vpc: vpcId,
+        });
+      }
+    } catch (err) {
+      Logger.error(`[network-associations-stack] - ${err}`);
+      throw new Error(
+        `[network-associations-stack] - Could not create target group for ${targetGroupItem.name} in vpc ${vpcItem.name}. Please review the target group configuration`,
+      );
+    }
+  }
+
+  private createInstanceTargetGroups(
+    targetGroupItem: TargetGroupItemConfig,
+    vpcItem: VpcConfig | VpcTemplatesConfig,
+    vpcId: string,
+  ) {
+    return new TargetGroup(this, `${vpcItem.name}-${targetGroupItem.name}`, {
+      name: targetGroupItem.name,
+      port: targetGroupItem.port,
+      protocol: targetGroupItem.protocol,
+      protocolVersion: targetGroupItem.protocolVersion,
+      type: targetGroupItem.type,
+      attributes: targetGroupItem.attributes,
+      healthCheck: targetGroupItem.healthCheck,
+      threshold: targetGroupItem.threshold,
+      matcher: targetGroupItem.matcher,
+      targets: targetGroupItem.targets as string[],
+      vpc: vpcId,
+    });
+  }
+
+  private createIpAndInstanceTargetGroups() {
+    try {
+      const targetGroupMap = new Map<string, TargetGroup>();
+      for (const vpcItem of [...this.props.networkConfig.vpcs, ...(this.props.networkConfig.vpcTemplates ?? [])] ??
+        []) {
+        const vpcAccountIds = this.getVpcAccountIds(vpcItem);
+
+        if (vpcAccountIds.includes(cdk.Stack.of(this).account) && vpcItem.region === cdk.Stack.of(this).region) {
+          const vpcId = cdk.aws_ssm.StringParameter.valueForStringParameter(
+            this,
+            `/accelerator/network/vpc/${vpcItem.name}/id`,
+          );
+          for (const targetGroupItem of vpcItem.targetGroups ?? []) {
+            if (targetGroupItem.type === 'ip') {
+              const targetGroup = this.createIpTargetGroup(targetGroupItem, vpcItem, vpcId);
+              targetGroupMap.set(`${vpcItem.name}-${targetGroupItem.name}`, targetGroup);
+            }
+            if (targetGroupItem.type === 'instance') {
+              const targetGroup = this.createInstanceTargetGroups(targetGroupItem, vpcItem, vpcId);
+              targetGroupMap.set(`${vpcItem.name}-${targetGroupItem.name}`, targetGroup);
+            }
+          }
+        }
+      }
+      return targetGroupMap;
+    } catch (err) {
+      console.log(err);
+      throw err;
+    }
+  }
+  /**
+   * Create an array of peering connections
+   */
+  private setPeeringList() {
+    const peeringList: Peering[] = [];
+    for (const peering of this.props.networkConfig.vpcPeering ?? []) {
+      // Get requester and accepter VPC configurations
+      const requesterVpc = this.props.networkConfig.vpcs.filter(item => item.name === peering.vpcs[0]);
+      const accepterVpc = this.props.networkConfig.vpcs.filter(item => item.name === peering.vpcs[1]);
+      const requesterAccountId = this.accountsConfig.getAccountId(requesterVpc[0].account);
+
+      // Check if requester VPC is in this account and region
+      if (cdk.Stack.of(this).account === requesterAccountId && cdk.Stack.of(this).region === requesterVpc[0].region) {
+        peeringList.push({
+          name: peering.name,
+          requester: requesterVpc[0],
+          accepter: accepterVpc[0],
+          tags: peering.tags,
+        });
+      }
+    }
+    return peeringList;
+  }
+
+  /**
+   * Create a custom resource provider to handle cross-account VPC peering routes
+   * @returns
+   */
+  private createCrossAcctRouteProvider(): cdk.custom_resources.Provider | undefined {
+    let createFramework = false;
+    for (const peering of this.peeringList) {
+      for (const routeTable of peering.accepter.routeTables ?? []) {
+        for (const routeTableEntry of routeTable.routes ?? []) {
+          if (
+            routeTableEntry.type &&
+            routeTableEntry.type === 'vpcPeering' &&
+            routeTableEntry.target === peering.name &&
+            (peering.accepter.account !== peering.requester.account ||
+              peering.accepter.region !== peering.requester.region)
+          ) {
+            createFramework = true;
+          }
+        }
+      }
+    }
+
+    if (createFramework) {
+      const provider = new CrossAccountRouteFramework(this, 'CrossAccountRouteFramework', {
+        logGroupKmsKey: this.cloudwatchKey,
+        logRetentionInDays: this.logRetention,
+      }).provider;
+
+      const iam4Paths = [
+        `${this.stackName}/CrossAccountRouteFramework/CrossAccountRouteFunction/ServiceRole/Resource`,
+        `${this.stackName}/CrossAccountRouteFramework/CrossAccountRouteProvider/framework-onEvent/ServiceRole/Resource`,
+      ];
+
+      const iam5Paths = [
+        `${this.stackName}/CrossAccountRouteFramework/CrossAccountRouteFunction/ServiceRole/DefaultPolicy/Resource`,
+        `${this.stackName}/CrossAccountRouteFramework/CrossAccountRouteProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+      ];
+
+      for (const iam4Path of iam4Paths) {
+        NagSuppressions.addResourceSuppressionsByPath(this, iam4Path, [
+          { id: 'AwsSolutions-IAM4', reason: 'Custom resource provider requires managed policy' },
+        ]);
+      }
+
+      for (const iam5Path of iam5Paths) {
+        NagSuppressions.addResourceSuppressionsByPath(this, iam5Path, [
+          { id: 'AwsSolutions-IAM5', reason: 'Custom resource provider requires access to assume cross-account role' },
+        ]);
+      }
+
+      return provider;
+    }
+    return undefined;
   }
 
   /**
    * Create a map of prefix list IDs
    * @param props
    */
-  private setPrefixListMap(props: AcceleratorStackProps): void {
+  private setPrefixListMap(props: AcceleratorStackProps): Map<string, string> {
+    const prefixListMap = new Map<string, string>();
     for (const prefixListItem of props.networkConfig.prefixLists ?? []) {
       // Check if the set belongs in this account/region
       const accountIds = prefixListItem.accounts.map(item => {
@@ -157,9 +639,122 @@ export class NetworkAssociationsStack extends AcceleratorStack {
           this,
           `/accelerator/network/prefixList/${prefixListItem.name}/id`,
         );
-        this.prefixListMap.set(prefixListItem.name, prefixListId);
+        prefixListMap.set(prefixListItem.name, prefixListId);
       }
     }
+
+    // Get cross-account prefix list IDs as needed
+    const crossAcctPrefixLists = this.setCrossAcctPrefixLists();
+    crossAcctPrefixLists.forEach((value, key) => prefixListMap.set(key, value));
+    return prefixListMap;
+  }
+
+  /**
+   * Get cross-account prefix list IDs
+   */
+  private setCrossAcctPrefixLists(): Map<string, string> {
+    const prefixListMap = new Map<string, string>();
+    for (const peering of this.peeringList) {
+      // Get account IDs
+      const requesterAccountId = this.accountsConfig.getAccountId(peering.requester.account);
+      const accepterAccountId = this.accountsConfig.getAccountId(peering.accepter.account);
+      const crossAccountCondition =
+        accepterAccountId !== requesterAccountId || peering.accepter.region !== peering.requester.region;
+
+      for (const routeTable of peering.accepter.routeTables ?? []) {
+        for (const routeTableEntry of routeTable.routes ?? []) {
+          const mapKey = `${peering.accepter.account}_${peering.accepter.region}_${routeTableEntry.destinationPrefixList}`;
+          if (
+            routeTableEntry.type &&
+            routeTableEntry.type === 'vpcPeering' &&
+            routeTableEntry.target === peering.name &&
+            crossAccountCondition &&
+            routeTableEntry.destinationPrefixList &&
+            !prefixListMap.has(mapKey)
+          ) {
+            const prefixListId = new SsmParameterLookup(
+              this,
+              pascalCase(`SsmParamLookup${routeTableEntry.destinationPrefixList}`),
+              {
+                name: `/accelerator/network/prefixList/${routeTableEntry.destinationPrefixList}/id`,
+                accountId: accepterAccountId,
+                parameterRegion: peering.accepter.region,
+                roleName: `AWSAccelerator-VpcPeeringRole-${peering.accepter.region}`,
+                kmsKey: this.cloudwatchKey,
+                logRetentionInDays: this.logRetention,
+              },
+            ).value;
+            prefixListMap.set(mapKey, prefixListId);
+          }
+        }
+      }
+    }
+    return prefixListMap;
+  }
+
+  /**
+   * Create a map of route table IDs
+   * @param props
+   */
+  private setRouteTableMap(props: AcceleratorStackProps): Map<string, string> {
+    const routeTableMap = new Map<string, string>();
+    for (const vpcItem of [...props.networkConfig.vpcs, ...(props.networkConfig.vpcTemplates ?? [])] ?? []) {
+      // Get account IDs
+      const vpcAccountIds = this.getVpcAccountIds(vpcItem);
+
+      if (vpcAccountIds.includes(cdk.Stack.of(this).account) && vpcItem.region === cdk.Stack.of(this).region) {
+        // Set route table IDs
+        for (const routeTableItem of vpcItem.routeTables ?? []) {
+          const routeTableId = cdk.aws_ssm.StringParameter.valueForStringParameter(
+            this,
+            `/accelerator/network/vpc/${vpcItem.name}/routeTable/${routeTableItem.name}/id`,
+          );
+          routeTableMap.set(`${vpcItem.name}_${routeTableItem.name}`, routeTableId);
+        }
+      }
+    }
+
+    // Get cross-account prefix list IDs as needed
+    const crossAcctRouteTables = this.setCrossAcctRouteTables();
+    crossAcctRouteTables.forEach((value, key) => routeTableMap.set(key, value));
+    return routeTableMap;
+  }
+
+  /**
+   * Get cross-account route tables
+   */
+  private setCrossAcctRouteTables(): Map<string, string> {
+    const routeTableMap = new Map<string, string>();
+    for (const peering of this.peeringList) {
+      // Get account IDs
+      const requesterAccountId = this.accountsConfig.getAccountId(peering.requester.account);
+      const accepterAccountId = this.accountsConfig.getAccountId(peering.accepter.account);
+      const crossAccountCondition =
+        accepterAccountId !== requesterAccountId || peering.accepter.region !== peering.requester.region;
+
+      for (const routeTable of peering.accepter.routeTables ?? []) {
+        for (const routeTableEntry of routeTable.routes ?? []) {
+          if (
+            routeTableEntry.type &&
+            routeTableEntry.type === 'vpcPeering' &&
+            routeTableEntry.target === peering.name &&
+            crossAccountCondition &&
+            !routeTableMap.has(`${peering.accepter.name}_${routeTable.name}`)
+          ) {
+            const routeTableId = new SsmParameterLookup(this, pascalCase(`SsmParamLookup${routeTable.name}`), {
+              name: `/accelerator/network/vpc/${peering.accepter.name}/routeTable/${routeTable.name}/id`,
+              accountId: accepterAccountId,
+              parameterRegion: peering.accepter.region,
+              roleName: `AWSAccelerator-VpcPeeringRole-${peering.accepter.region}`,
+              kmsKey: this.cloudwatchKey,
+              logRetentionInDays: this.logRetention,
+            }).value;
+            routeTableMap.set(`${peering.accepter.name}_${routeTable.name}`, routeTableId);
+          }
+        }
+      }
+    }
+    return routeTableMap;
   }
 
   /**
@@ -180,9 +775,21 @@ export class NetworkAssociationsStack extends AcceleratorStack {
     // for VPC attachments
     //
     for (const vpcItem of [...props.networkConfig.vpcs, ...(props.networkConfig.vpcTemplates ?? [])] ?? []) {
-      this.setTransitGatewayAttachmentsMap(vpcItem);
+      this.setTransitGatewayVpcAttachmentsMap(vpcItem);
       this.createVpcTransitGatewayAssociations(vpcItem);
       this.createVpcTransitGatewayPropagations(vpcItem);
+    }
+
+    //
+    // Create Transit Gateway route table associations and propagations
+    // for VPN attachments
+    //
+    for (const cgwItem of props.networkConfig.customerGateways ?? []) {
+      for (const vpnItem of cgwItem.vpnConnections ?? []) {
+        this.setTransitGatewayVpnAttachmentsMap(props, cgwItem, vpnItem);
+        this.createVpnTransitGatewayAssociations(cgwItem, vpnItem);
+        this.createVpnTransitGatewayPropagations(cgwItem, vpnItem);
+      }
     }
   }
 
@@ -240,13 +847,14 @@ export class NetworkAssociationsStack extends AcceleratorStack {
    * Create a map of transit gateway attachments
    * @param vpcItem
    */
-  private setTransitGatewayAttachmentsMap(vpcItem: VpcConfig | VpcTemplatesConfig) {
+  private setTransitGatewayVpcAttachmentsMap(vpcItem: VpcConfig | VpcTemplatesConfig) {
     // Get account names for attachment keys
     const [accountNames, excludedAccountIds] = this.getTransitGatewayAttachmentAccounts(vpcItem);
 
     if (vpcItem.region === cdk.Stack.of(this).region) {
       for (const tgwAttachmentItem of vpcItem.transitGatewayAttachments ?? []) {
         const accountId = this.accountsConfig.getAccountId(tgwAttachmentItem.transitGateway.account);
+
         if (accountId === cdk.Stack.of(this).account) {
           // Get the Transit Gateway ID
           const transitGatewayId = this.transitGateways.get(tgwAttachmentItem.transitGateway.name);
@@ -285,6 +893,7 @@ export class NetworkAssociationsStack extends AcceleratorStack {
                   name: tgwAttachmentItem.name,
                   owningAccountId,
                   transitGatewayId,
+                  type: TransitGatewayAttachmentType.VPC,
                   roleName: `AWSAccelerator-DescribeTgwAttachRole-${cdk.Stack.of(this).region}`,
                   kmsKey: this.cloudwatchKey,
                   logRetentionInDays: this.logRetention,
@@ -404,6 +1013,130 @@ export class NetworkAssociationsStack extends AcceleratorStack {
             }
           }
         }
+      }
+    }
+  }
+
+  /**
+   * Set VPN attachment items in TGW map
+   * @param props
+   * @param cgwItem
+   * @param vpnItem
+   */
+  private setTransitGatewayVpnAttachmentsMap(
+    props: AcceleratorStackProps,
+    cgwItem: CustomerGatewayConfig,
+    vpnItem: VpnConnectionConfig,
+  ): void {
+    const accountId = props.accountsConfig.getAccountId(cgwItem.account);
+    if (
+      accountId === cdk.Stack.of(this).account &&
+      cgwItem.region === cdk.Stack.of(this).region &&
+      vpnItem.transitGateway
+    ) {
+      // Lookup TGW attachment ID for VPN
+      const tgw = props.networkConfig.transitGateways.find(tgwItem => tgwItem.name === vpnItem.transitGateway)!;
+      const transitGatewayId = this.transitGateways.get(tgw.name);
+
+      if (!transitGatewayId) {
+        throw new Error(`Transit Gateway ${tgw.name} not found`);
+      }
+
+      const vpnAttachmentId = TransitGatewayAttachment.fromLookup(
+        this,
+        pascalCase(`${vpnItem.name}VpnTransitGatewayAttachment`),
+        {
+          name: vpnItem.name,
+          owningAccountId: accountId,
+          transitGatewayId,
+          type: TransitGatewayAttachmentType.VPN,
+          kmsKey: this.cloudwatchKey,
+          logRetentionInDays: this.logRetention,
+        },
+      ).transitGatewayAttachmentId;
+      // Add to Transit Gateway Attachment Map
+      this.transitGatewayAttachments.set(`${vpnItem.name}_${tgw.name}`, vpnAttachmentId);
+    }
+  }
+
+  /**
+   * Create VPN TGW route table associations
+   * @param cgwItem
+   * @param vpnItem
+   */
+  private createVpnTransitGatewayAssociations(cgwItem: CustomerGatewayConfig, vpnItem: VpnConnectionConfig): void {
+    const accountId = this.props.accountsConfig.getAccountId(cgwItem.account);
+    if (
+      accountId === cdk.Stack.of(this).account &&
+      cgwItem.region === cdk.Stack.of(this).region &&
+      vpnItem.routeTableAssociations
+    ) {
+      // Lookup TGW attachment ID for VPN
+      const attachmentKey = `${vpnItem.name}_${vpnItem.transitGateway}`;
+      const transitGatewayAttachmentId = this.transitGatewayAttachments.get(attachmentKey);
+
+      if (!transitGatewayAttachmentId) {
+        throw new Error(`Transit Gateway attachment ${attachmentKey} not found`);
+      }
+
+      // Create route table associations
+      for (const routeTableItem of vpnItem.routeTableAssociations ?? []) {
+        const routeTableKey = `${vpnItem.transitGateway}_${routeTableItem}`;
+        const transitGatewayRouteTableId = this.transitGatewayRouteTables.get(routeTableKey);
+
+        if (!transitGatewayRouteTableId) {
+          throw new Error(`Transit Gateway Route Table ${routeTableKey} not found`);
+        }
+
+        new TransitGatewayRouteTableAssociation(
+          this,
+          `${pascalCase(vpnItem.name)}${pascalCase(routeTableItem)}Association`,
+          {
+            transitGatewayAttachmentId,
+            transitGatewayRouteTableId,
+          },
+        );
+      }
+    }
+  }
+
+  /**
+   * Create VPN TGW route table propagations
+   * @param cgwItem
+   * @param vpnItem
+   */
+  private createVpnTransitGatewayPropagations(cgwItem: CustomerGatewayConfig, vpnItem: VpnConnectionConfig): void {
+    const accountId = this.props.accountsConfig.getAccountId(cgwItem.account);
+    if (
+      accountId === cdk.Stack.of(this).account &&
+      cgwItem.region === cdk.Stack.of(this).region &&
+      vpnItem.routeTablePropagations
+    ) {
+      // Lookup TGW attachment ID for VPN
+      const attachmentKey = `${vpnItem.name}_${vpnItem.transitGateway}`;
+      const transitGatewayAttachmentId = this.transitGatewayAttachments.get(attachmentKey);
+
+      if (!transitGatewayAttachmentId) {
+        throw new Error(`Transit Gateway attachment ${attachmentKey} not found`);
+      }
+
+      // Create route table propagations
+      for (const routeTableItem of vpnItem.routeTablePropagations ?? []) {
+        const routeTableKey = `${vpnItem.transitGateway}_${routeTableItem}`;
+        const transitGatewayRouteTableId = this.transitGatewayRouteTables.get(routeTableKey);
+
+        if (!transitGatewayRouteTableId) {
+          throw new Error(`Transit Gateway Route Table ${routeTableKey} not found`);
+        }
+
+        new TransitGatewayRouteTablePropagation(
+          this,
+          `${pascalCase(vpnItem.name)}${pascalCase(routeTableItem)}Propagation`,
+          {
+            transitGatewayAttachmentId,
+            transitGatewayRouteTableId,
+          },
+        );
       }
     }
   }
@@ -675,37 +1408,13 @@ export class NetworkAssociationsStack extends AcceleratorStack {
    * Create VPC peering connections
    */
   private createVpcPeeringConnections(): void {
-    const peeringList: Peering[] = [];
-    for (const peering of this.props.networkConfig.vpcPeering ?? []) {
-      // Check to ensure only two VPCs are defined
-      if (peering.vpcs.length > 2) {
-        throw new Error(`[network-vpc-stack] VPC peering connection ${peering.name} has more than two VPCs defined`);
-      }
-
-      // Get requester and accepter VPC configurations
-      const requesterVpc = this.props.networkConfig.vpcs.filter(item => item.name === peering.vpcs[0]);
-      const accepterVpc = this.props.networkConfig.vpcs.filter(item => item.name === peering.vpcs[1]);
-
-      if (requesterVpc.length === 1 && accepterVpc.length === 1) {
-        const requesterAccountId = this.accountsConfig.getAccountId(requesterVpc[0].account);
-
-        // Check if requester VPC is in this account and region
-        if (cdk.Stack.of(this).account === requesterAccountId && cdk.Stack.of(this).region === requesterVpc[0].region) {
-          peeringList.push({
-            name: peering.name,
-            requester: requesterVpc[0],
-            accepter: accepterVpc[0],
-            tags: peering.tags,
-          });
-        }
-      }
-    }
-
     // Create VPC peering connections
-    for (const peering of peeringList ?? []) {
+    for (const peering of this.peeringList) {
       // Get account IDs
       const requesterAccountId = this.accountsConfig.getAccountId(peering.requester.account);
       const accepterAccountId = this.accountsConfig.getAccountId(peering.accepter.account);
+      const crossAccountCondition =
+        accepterAccountId !== requesterAccountId || peering.accepter.region !== peering.requester.region;
 
       // Get SSM parameters
       const requesterVpcId = cdk.aws_ssm.StringParameter.valueForStringParameter(
@@ -715,7 +1424,7 @@ export class NetworkAssociationsStack extends AcceleratorStack {
 
       let accepterVpcId: string;
       let accepterRoleName: string | undefined = undefined;
-      if (requesterAccountId !== accepterAccountId) {
+      if (crossAccountCondition) {
         accepterVpcId = new SsmParameterLookup(this, pascalCase(`SsmParamLookup${peering.name}`), {
           name: `/accelerator/network/vpc/${peering.accepter.name}/id`,
           accountId: accepterAccountId,
@@ -746,16 +1455,17 @@ export class NetworkAssociationsStack extends AcceleratorStack {
         vpcId: requesterVpcId,
         tags: peering.tags ?? [],
       });
-      new cdk.aws_ssm.StringParameter(this, pascalCase(`SsmParam${pascalCase(peering.name)}VpcPeering`), {
+      this.ssmParameters.push({
+        logicalId: pascalCase(`SsmParam${pascalCase(peering.name)}VpcPeering`),
         parameterName: `/accelerator/network/vpcPeering/${peering.name}/id`,
         stringValue: vpcPeering.peeringId,
       });
 
       // Put cross-account SSM parameter if necessary
-      if (requesterAccountId !== accepterAccountId) {
+      if (crossAccountCondition) {
         new PutSsmParameter(this, pascalCase(`CrossAcctSsmParam${pascalCase(peering.name)}VpcPeering`), {
           region: peering.accepter.region,
-          partition: cdk.Stack.of(this).partition,
+          partition: this.props.partition,
           kmsKey: this.cloudwatchKey,
           logRetentionInDays: this.logRetention,
           parameter: {
@@ -766,6 +1476,162 @@ export class NetworkAssociationsStack extends AcceleratorStack {
           },
           invokingAccountID: cdk.Stack.of(this).account,
         });
+      }
+
+      // Create peering routes
+      this.createVpcPeeringRoutes(accepterAccountId, peering.requester, peering.accepter, vpcPeering);
+    }
+  }
+
+  /**
+   * Create VPC peering routes
+   * @param requesterAccountId
+   * @param accepterAccountId
+   * @param requesterVpc
+   * @param accepterVpc
+   * @param peering
+   */
+  private createVpcPeeringRoutes(
+    accepterAccountId: string,
+    requesterVpc: VpcConfig,
+    accepterVpc: VpcConfig,
+    peering: VpcPeering,
+  ): void {
+    // Create requester VPC routes
+    this.createRequesterVpcPeeringRoutes(requesterVpc, peering);
+
+    // Create accepter account routes
+    this.createAccepterVpcPeeringRoutes(accepterAccountId, accepterVpc, requesterVpc, peering);
+  }
+
+  /**
+   * Create requester peering routes
+   * @param requesterVpc
+   * @param peering
+   */
+  private createRequesterVpcPeeringRoutes(requesterVpc: VpcConfig, peering: VpcPeering): void {
+    for (const routeTable of requesterVpc.routeTables ?? []) {
+      for (const routeTableEntry of routeTable.routes ?? []) {
+        if (routeTableEntry.type && routeTableEntry.type === 'vpcPeering' && routeTableEntry.target === peering.name) {
+          Logger.info(
+            `[network-associations-stack] Add route ${routeTableEntry.name} targeting VPC peer ${peering.name}`,
+          );
+          let destination: string | undefined = undefined;
+          let destinationPrefixListId: string | undefined = undefined;
+          const routeTableId = this.routeTableMap.get(`${requesterVpc.name}_${routeTable.name}`);
+          const routeId =
+            pascalCase(`${requesterVpc.name}Vpc`) +
+            pascalCase(`${routeTable.name}RouteTable`) +
+            pascalCase(routeTableEntry.name);
+          if (!routeTableId) {
+            throw new Error(`Route Table ${routeTable.name} not found`);
+          }
+
+          if (routeTableEntry.destinationPrefixList) {
+            // Get PL ID from map
+            destinationPrefixListId = this.prefixListMap.get(routeTableEntry.destinationPrefixList);
+            if (!destinationPrefixListId) {
+              throw new Error(
+                `[network-associations-stack] Prefix list ${routeTableEntry.destinationPrefixList} not found`,
+              );
+            }
+          } else {
+            destination = routeTableEntry.destination;
+          }
+
+          peering.addPeeringRoute(
+            routeId,
+            routeTableId,
+            destination,
+            destinationPrefixListId,
+            this.cloudwatchKey,
+            this.logRetention,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Create accepter VPC routes
+   * @param accepterAccountId
+   * @param accepterVpc
+   * @param requesterVpc
+   * @param peering
+   */
+  private createAccepterVpcPeeringRoutes(
+    accepterAccountId: string,
+    accepterVpc: VpcConfig,
+    requesterVpc: VpcConfig,
+    peering: VpcPeering,
+  ): void {
+    for (const routeTable of accepterVpc.routeTables ?? []) {
+      for (const routeTableEntry of routeTable.routes ?? []) {
+        if (routeTableEntry.type && routeTableEntry.type === 'vpcPeering' && routeTableEntry.target === peering.name) {
+          Logger.info(
+            `[network-associations-stack] Add route ${routeTableEntry.name} targeting VPC peer ${peering.name}`,
+          );
+          let destination: string | undefined = undefined;
+          let destinationPrefixListId: string | undefined = undefined;
+          const routeId =
+            pascalCase(`${accepterVpc.name}Vpc`) +
+            pascalCase(`${routeTable.name}RouteTable`) +
+            pascalCase(routeTableEntry.name);
+          const routeTableId = this.routeTableMap.get(`${accepterVpc.name}_${routeTable.name}`);
+          if (!routeTableId) {
+            throw new Error(`[network-associations-stack] Route Table ${routeTable.name} not found`);
+          }
+
+          if (requesterVpc.account === accepterVpc.account && requesterVpc.region === accepterVpc.region) {
+            if (routeTableEntry.destinationPrefixList) {
+              // Get PL ID from map
+              destinationPrefixListId = this.prefixListMap.get(routeTableEntry.destinationPrefixList);
+              if (!destinationPrefixListId) {
+                throw new Error(
+                  `[network-associations-stack] Prefix list ${routeTableEntry.destinationPrefixList} not found`,
+                );
+              }
+            } else {
+              destination = routeTableEntry.destination;
+            }
+
+            peering.addPeeringRoute(
+              routeId,
+              routeTableId,
+              destination,
+              destinationPrefixListId,
+              this.cloudwatchKey,
+              this.logRetention,
+            );
+          } else {
+            if (routeTableEntry.destinationPrefixList) {
+              // Get PL ID from map
+              destinationPrefixListId = this.prefixListMap.get(
+                `${accepterVpc.account}_${accepterVpc.region}_${routeTableEntry.destinationPrefixList}`,
+              );
+            } else {
+              destination = routeTableEntry.destination;
+            }
+
+            if (!this.crossAcctRouteProvider) {
+              throw new Error(
+                `[network-associations-stack] Cross-account route provider not created but required for ${routeTableEntry.name}`,
+              );
+            }
+
+            peering.addCrossAcctPeeringRoute({
+              id: routeId,
+              ownerAccount: accepterAccountId,
+              ownerRegion: accepterVpc.region,
+              partition: this.props.partition,
+              provider: this.crossAcctRouteProvider,
+              roleName: `AWSAccelerator-VpcPeeringRole-${accepterVpc.region}`,
+              routeTableId,
+              destination,
+              destinationPrefixListId,
+            });
+          }
+        }
       }
     }
   }
@@ -1074,19 +1940,6 @@ export class NetworkAssociationsStack extends AcceleratorStack {
     routeItem: TransitGatewayRouteEntryConfig,
     transitGatewayRouteTableId: string,
   ): void {
-    // Throw exception when a blackhole route and a VPC attachment is presented.
-    if (routeItem.blackhole && routeItem.attachment) {
-      throw new Error(
-        `[network-associations-stack] Transit gateway route specifies both blackhole and attachment target. Please choose only one.`,
-      );
-    }
-
-    if (routeItem.destinationCidrBlock && routeItem.destinationPrefixList) {
-      throw new Error(
-        `[network-associations-stack] Transit gateway route using destination and destinationPrefixList. Please choose only one destination type`,
-      );
-    }
-
     //
     // Create static routes
     //
@@ -1100,6 +1953,7 @@ export class NetworkAssociationsStack extends AcceleratorStack {
         routeId = `${routeTableItem.name}-${routeItem.destinationCidrBlock}-blackhole`;
       }
 
+      // If route is for VPC attachment
       if (routeItem.attachment && NetworkConfigTypes.transitGatewayRouteTableVpcEntryConfig.is(routeItem.attachment)) {
         Logger.info(
           `[network-associations-stack] Adding route ${routeItem.destinationCidrBlock} to TGW route table ${routeTableItem.name} for TGW ${tgwItem.name} in account: ${tgwItem.account}`,
@@ -1112,6 +1966,7 @@ export class NetworkAssociationsStack extends AcceleratorStack {
         );
       }
 
+      // If route is for DX Gateway attachment
       if (
         routeItem.attachment &&
         NetworkConfigTypes.transitGatewayRouteTableDxGatewayEntryConfig.is(routeItem.attachment)
@@ -1124,6 +1979,36 @@ export class NetworkAssociationsStack extends AcceleratorStack {
         // Get TGW attachment ID
         transitGatewayAttachmentId = this.transitGatewayAttachments.get(
           `${routeItem.attachment.directConnectGatewayName}_${tgwItem.name}`,
+        );
+      }
+
+      // If route is for VPN attachment
+      if (routeItem.attachment && NetworkConfigTypes.transitGatewayRouteTableVpnEntryConfig.is(routeItem.attachment)) {
+        Logger.info(
+          `[network-associations-stack] Adding route ${routeItem.destinationCidrBlock} to TGW route table ${routeTableItem.name} for TGW ${tgwItem.name} in account: ${tgwItem.account}`,
+        );
+        routeId = `${routeTableItem.name}-${routeItem.destinationCidrBlock}-${routeItem.attachment.vpnConnectionName}`;
+
+        // Get TGW attachment ID
+        transitGatewayAttachmentId = this.transitGatewayAttachments.get(
+          `${routeItem.attachment.vpnConnectionName}_${tgwItem.name}`,
+        );
+      }
+
+      // If route is for TGW peering attachment
+      if (
+        routeItem.attachment &&
+        NetworkConfigTypes.transitGatewayRouteTableTgwPeeringEntryConfig.is(routeItem.attachment)
+      ) {
+        Logger.info(
+          `[network-associations-stack] Adding route ${routeItem.destinationCidrBlock} to TGW route table ${routeTableItem.name} for TGW ${tgwItem.name} in account: ${tgwItem.account}`,
+        );
+        routeId = `${routeTableItem.name}-${routeItem.destinationCidrBlock}-${routeItem.attachment.transitGatewayPeeringName}`;
+
+        // Get TGW attachment ID
+        transitGatewayAttachmentId = this.getTgwPeeringAttachmentId(
+          routeItem.attachment.transitGatewayPeeringName,
+          tgwItem,
         );
       }
 
@@ -1160,6 +2045,8 @@ export class NetworkAssociationsStack extends AcceleratorStack {
         );
         plRouteId = pascalCase(`${routeTableItem.name}${routeItem.destinationPrefixList}Blackhole`);
       }
+
+      // If route is for VPC attachment
       if (routeItem.attachment && NetworkConfigTypes.transitGatewayRouteTableVpcEntryConfig.is(routeItem.attachment)) {
         Logger.info(
           `[network-associations-stack] Adding prefix list reference ${routeItem.destinationPrefixList} to TGW route table ${routeTableItem.name} for TGW ${tgwItem.name} in account: ${tgwItem.account}`,
@@ -1174,6 +2061,7 @@ export class NetworkAssociationsStack extends AcceleratorStack {
         );
       }
 
+      // If route is for DX Gateway attachment
       if (
         routeItem.attachment &&
         NetworkConfigTypes.transitGatewayRouteTableDxGatewayEntryConfig.is(routeItem.attachment)
@@ -1188,6 +2076,40 @@ export class NetworkAssociationsStack extends AcceleratorStack {
         // Get TGW attachment ID
         transitGatewayAttachmentId = this.transitGatewayAttachments.get(
           `${routeItem.attachment.directConnectGatewayName}_${tgwItem.name}`,
+        );
+      }
+
+      // If route is for VPN attachment
+      if (routeItem.attachment && NetworkConfigTypes.transitGatewayRouteTableVpnEntryConfig.is(routeItem.attachment)) {
+        Logger.info(
+          `[network-associations-stack] Adding prefix list reference ${routeItem.destinationPrefixList} to TGW route table ${routeTableItem.name} for TGW ${tgwItem.name} in account: ${tgwItem.account}`,
+        );
+        plRouteId = pascalCase(
+          `${routeTableItem.name}${routeItem.destinationPrefixList}${routeItem.attachment.vpnConnectionName}`,
+        );
+
+        // Get TGW attachment ID
+        transitGatewayAttachmentId = this.transitGatewayAttachments.get(
+          `${routeItem.attachment.vpnConnectionName}_${tgwItem.name}`,
+        );
+      }
+
+      // If route is for TGW peering attachment
+      if (
+        routeItem.attachment &&
+        NetworkConfigTypes.transitGatewayRouteTableTgwPeeringEntryConfig.is(routeItem.attachment)
+      ) {
+        Logger.info(
+          `[network-associations-stack] Adding prefix list reference ${routeItem.destinationPrefixList} to TGW route table ${routeTableItem.name} for TGW ${tgwItem.name} in account: ${tgwItem.account}`,
+        );
+        plRouteId = pascalCase(
+          `${routeTableItem.name}${routeItem.destinationPrefixList}${routeItem.attachment.transitGatewayPeeringName}`,
+        );
+
+        // Get TGW attachment ID
+        transitGatewayAttachmentId = this.getTgwPeeringAttachmentId(
+          routeItem.attachment.transitGatewayPeeringName,
+          tgwItem,
         );
       }
 
@@ -1209,6 +2131,60 @@ export class NetworkAssociationsStack extends AcceleratorStack {
     }
   }
 
+  /**
+   * Function to get transit gateway peering attachment ID
+   * @param transitGatewayPeeringName
+   * @param tgwItem
+   * @returns
+   */
+  private getTgwPeeringAttachmentId(transitGatewayPeeringName: string, tgwItem: TransitGatewayConfig): string {
+    const requesterConfig = this.props.networkConfig.getTgwPeeringRequesterAccepterConfig(
+      transitGatewayPeeringName,
+      'requester',
+    );
+    const accepterConfig = this.props.networkConfig.getTgwPeeringRequesterAccepterConfig(
+      transitGatewayPeeringName,
+      'accepter',
+    );
+
+    if (!requesterConfig || !accepterConfig) {
+      throw new Error(`Transit gateway peering ${transitGatewayPeeringName} not found !!!`);
+    }
+
+    // Get TGW attachment ID for requester
+    if (this.props.accountsConfig.getAccountId(requesterConfig.account) === cdk.Stack.of(this).account) {
+      return cdk.aws_ssm.StringParameter.valueForStringParameter(
+        this,
+        `/accelerator/network/transitGateways/${tgwItem.name}/peering/${transitGatewayPeeringName}/id`,
+      );
+    }
+
+    // Get TGW attachment ID for accepter
+    if (this.props.accountsConfig.getAccountId(accepterConfig.account) === cdk.Stack.of(this).account) {
+      const transitGatewayId = this.transitGateways.get(accepterConfig.transitGatewayName);
+      if (!transitGatewayId) {
+        throw new Error(`Transit Gateway ${accepterConfig.transitGatewayName} not found`);
+      }
+
+      Logger.info(
+        `[network-associations-stack] Looking up transit gateway peering attachment id of accepter account ${accepterConfig.account}`,
+      );
+      return TransitGatewayAttachment.fromLookup(
+        this,
+        pascalCase(`${accepterConfig.account}${transitGatewayPeeringName}TransitGatewayPeeringAttachment`),
+        {
+          name: transitGatewayPeeringName,
+          owningAccountId: cdk.Stack.of(this).account,
+          transitGatewayId,
+          type: TransitGatewayAttachmentType.PEERING,
+          kmsKey: this.cloudwatchKey,
+          logRetentionInDays: this.logRetention,
+        },
+      ).transitGatewayAttachmentId;
+    }
+
+    throw new Error(`Transit Gateway attachment id not found for ${transitGatewayPeeringName}`);
+  }
   /**
    * Check if resource is shared with stack.
    *
@@ -1252,12 +2228,634 @@ export class NetworkAssociationsStack extends AcceleratorStack {
                 subnetTags,
                 sharedSubnetId,
                 owningAccountId,
+                vpcName: vpc.name,
+                subnetName: subnet.name,
                 resourceLoggingKmsKey: this.cloudwatchKey,
                 logRetentionInDays: this.logRetention,
               });
             }
           }
         }
+      }
+    }
+  }
+
+  /**
+   * Create Managed active directories
+   */
+  private createManagedActiveDirectories() {
+    for (const managedActiveDirectory of this.props.iamConfig.managedActiveDirectories ?? []) {
+      const madAccountId = this.props.accountsConfig.getAccountId(managedActiveDirectory.account);
+
+      if (madAccountId === cdk.Stack.of(this).account && managedActiveDirectory.region === cdk.Stack.of(this).region) {
+        Logger.info(`[network-associations-stack] Creating Managed active directory ${managedActiveDirectory.name}`);
+
+        const madVpcLookup = new VpcIdLookup(this, `${pascalCase(managedActiveDirectory.name)}VpcLookup`, {
+          vpcName: managedActiveDirectory.vpcSettings.vpcName,
+          lambdaKey: this.lambdaKey,
+          cloudwatchKey: this.cloudwatchKey,
+          cloudwatchLogRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
+        });
+
+        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(
+            managedActiveDirectory.name,
+          )}VpcLookup/VpcIdLookupFunction/ServiceRole/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM4',
+              reason: 'Custom resource lambda needs this access.',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(
+            managedActiveDirectory.name,
+          )}VpcLookup/VpcIdLookupProvider/framework-onEvent/ServiceRole/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM4',
+              reason: 'Custom resource lambda needs this access.',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(
+            managedActiveDirectory.name,
+          )}VpcLookup/VpcIdLookupFunction/ServiceRole/DefaultPolicy/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason: 'Custom resource lambda needs this access.',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(
+            managedActiveDirectory.name,
+          )}VpcLookup/VpcIdLookupProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason: 'Custom resource lambda needs this access.',
+            },
+          ],
+        );
+
+        const madSubnetIds: string[] = [];
+        let madInstanceSubnetId: string | undefined;
+        for (const madSubnet of managedActiveDirectory.vpcSettings.subnets ?? []) {
+          const madSubnetLookup = new SubnetIdLookup(
+            this,
+            `${pascalCase(managedActiveDirectory.name)}${pascalCase(madSubnet)}SubnetLookup`,
+            {
+              subnetName: madSubnet,
+              vpcId: madVpcLookup.vpcId,
+              lambdaKey: this.lambdaKey,
+              cloudwatchKey: this.cloudwatchKey,
+              cloudwatchLogRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
+            },
+          );
+
+          // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+          NagSuppressions.addResourceSuppressionsByPath(
+            this,
+            `${this.stackName}/${pascalCase(managedActiveDirectory.name)}${pascalCase(
+              madSubnet,
+            )}SubnetLookup/SubnetIdLookupFunction/ServiceRole/Resource`,
+            [
+              {
+                id: 'AwsSolutions-IAM4',
+                reason: 'Custom resource lambda needs this access.',
+              },
+            ],
+          );
+
+          // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+          NagSuppressions.addResourceSuppressionsByPath(
+            this,
+            `${this.stackName}/${pascalCase(managedActiveDirectory.name)}${pascalCase(
+              madSubnet,
+            )}SubnetLookup/SubnetIdLookupProvider/framework-onEvent/ServiceRole/Resource`,
+            [
+              {
+                id: 'AwsSolutions-IAM4',
+                reason: 'Custom resource lambda needs this access.',
+              },
+            ],
+          );
+
+          // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+          NagSuppressions.addResourceSuppressionsByPath(
+            this,
+            `${this.stackName}/${pascalCase(managedActiveDirectory.name)}${pascalCase(
+              madSubnet,
+            )}SubnetLookup/SubnetIdLookupProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+            [
+              {
+                id: 'AwsSolutions-IAM5',
+                reason: 'Custom resource lambda needs this access.',
+              },
+            ],
+          );
+
+          // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+          NagSuppressions.addResourceSuppressionsByPath(
+            this,
+            `${this.stackName}/${pascalCase(managedActiveDirectory.name)}${pascalCase(
+              madSubnet,
+            )}SubnetLookup/SubnetIdLookupFunction/ServiceRole/DefaultPolicy/Resource`,
+            [
+              {
+                id: 'AwsSolutions-IAM5',
+                reason: 'Custom resource lambda needs this access.',
+              },
+            ],
+          );
+          madSubnetIds.push(madSubnetLookup.subnetId);
+
+          if (
+            managedActiveDirectory.activeDirectoryConfigurationInstance &&
+            madSubnet === managedActiveDirectory.activeDirectoryConfigurationInstance.subnetName
+          ) {
+            madInstanceSubnetId = madSubnetLookup.subnetId;
+          }
+        }
+
+        let logGroupName = `/aws/directoryservice/${managedActiveDirectory.name}`;
+
+        if (managedActiveDirectory.logs) {
+          logGroupName = managedActiveDirectory.logs.groupName;
+        }
+
+        const secretName = `/accelerator/ad-user/${
+          managedActiveDirectory.name
+        }/${this.props.iamConfig.getManageActiveDirectoryAdminSecretName(managedActiveDirectory.name)}`;
+
+        const madAdminSecretAccountId = this.props.accountsConfig.getAccountId(
+          this.props.iamConfig.getManageActiveDirectorySecretAccountName(managedActiveDirectory.name),
+        );
+
+        const madAdminSecretRegion = this.props.iamConfig.getManageActiveDirectorySecretRegion(
+          managedActiveDirectory.name,
+        );
+
+        const adminSecretArn = `arn:aws:secretsmanager:${madAdminSecretRegion}:${madAdminSecretAccountId}:secret:${secretName}`;
+
+        const adminSecretValue = cdk.SecretValue.secretsManager(adminSecretArn);
+
+        const activeDirectory = new ActiveDirectory(this, `${pascalCase(managedActiveDirectory.name)}ActiveDirectory`, {
+          directoryName: managedActiveDirectory.name,
+          dnsName: managedActiveDirectory.dnsName,
+          vpcId: madVpcLookup.vpcId,
+          madSubnetIds: madSubnetIds,
+          adminSecretValue,
+          edition: managedActiveDirectory.edition,
+          netBiosDomainName: managedActiveDirectory.netBiosDomainName,
+          logGroupName: logGroupName,
+          logRetentionInDays:
+            managedActiveDirectory.logs?.retentionInDays ?? this.props.globalConfig.cloudwatchLogRetentionInDays,
+          lambdaKey: this.lambdaKey,
+          cloudwatchKey: this.cloudwatchKey,
+          cloudwatchLogRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
+        });
+
+        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(managedActiveDirectory.name)}ActiveDirectory/${pascalCase(
+            managedActiveDirectory.name,
+          )}LogSubscription/ManageActiveDirectoryLogSubscriptionFunction/ServiceRole/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM4',
+              reason: 'CDK created IAM user, role, or group.',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(managedActiveDirectory.name)}ActiveDirectory/${pascalCase(
+            managedActiveDirectory.name,
+          )}LogSubscription/ManageActiveDirectoryLogSubscriptionProvider/framework-onEvent/ServiceRole/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM4',
+              reason: 'CDK created IAM user, role, or group.',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(managedActiveDirectory.name)}ActiveDirectory/${pascalCase(
+            managedActiveDirectory.name,
+          )}LogSubscription/ManageActiveDirectoryLogSubscriptionFunction/ServiceRole/DefaultPolicy/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason: 'CDK created IAM service role entity.',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(managedActiveDirectory.name)}ActiveDirectory/${pascalCase(
+            managedActiveDirectory.name,
+          )}LogSubscription/ManageActiveDirectoryLogSubscriptionProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason: 'CDK created IAM service role entity.',
+            },
+          ],
+        );
+
+        // Share active directory
+        const sharedAccountNames = this.props.iamConfig.getManageActiveDirectorySharedAccountNames(
+          managedActiveDirectory.name,
+          this.props.configDirPath,
+        );
+
+        const sharedAccountIds: string[] = [];
+        for (const account of sharedAccountNames) {
+          sharedAccountIds.push(this.props.accountsConfig.getAccountId(account));
+        }
+
+        if (sharedAccountIds.length > 0) {
+          Logger.info(`[network-associations-stack] Sharing Managed active directory ${managedActiveDirectory.name}`);
+          const shareActiveDirectory = new ShareActiveDirectory(
+            this,
+            `${pascalCase(managedActiveDirectory.name)}ShareDirectory`,
+            {
+              directoryId: activeDirectory.id,
+              sharedTargetAccountIds: sharedAccountIds,
+              accountAccessRoleName: AcceleratorStack.ACCELERATOR_MAD_SHARE_ACCEPT_ROLE_NAME,
+              lambdaKey: this.lambdaKey,
+              cloudwatchKey: this.cloudwatchKey,
+              cloudwatchLogRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
+            },
+          );
+
+          shareActiveDirectory.node.addDependency(activeDirectory);
+
+          // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+          NagSuppressions.addResourceSuppressionsByPath(
+            this,
+            `${this.stackName}/${pascalCase(
+              managedActiveDirectory.name,
+            )}ShareDirectory/ShareManageActiveDirectoryFunction/ServiceRole/DefaultPolicy/Resource`,
+            [
+              {
+                id: 'AwsSolutions-IAM5',
+                reason: 'Custom resource lambda needs to access to directory service.',
+              },
+            ],
+          );
+
+          // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+          NagSuppressions.addResourceSuppressionsByPath(
+            this,
+            `${this.stackName}/${pascalCase(
+              managedActiveDirectory.name,
+            )}ShareDirectory/ShareManageActiveDirectoryFunction/ServiceRole/Resource`,
+            [
+              {
+                id: 'AwsSolutions-IAM4',
+                reason: 'Custom resource lambda needs to access to directory service.',
+              },
+            ],
+          );
+
+          // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+          NagSuppressions.addResourceSuppressionsByPath(
+            this,
+            `${this.stackName}/${pascalCase(
+              managedActiveDirectory.name,
+            )}ShareDirectory/ShareManageActiveDirectoryProvider/framework-onEvent/ServiceRole/Resource`,
+            [
+              {
+                id: 'AwsSolutions-IAM4',
+                reason: 'Custom resource lambda needs to access to directory service.',
+              },
+            ],
+          );
+
+          // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+          NagSuppressions.addResourceSuppressionsByPath(
+            this,
+            `${this.stackName}/${pascalCase(
+              managedActiveDirectory.name,
+            )}ShareDirectory/ShareManageActiveDirectoryProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+            [
+              {
+                id: 'AwsSolutions-IAM5',
+                reason: 'Custom resource lambda needs to access to directory service.',
+              },
+            ],
+          );
+        }
+
+        // Update resolver group rule with mad dns ips
+        this.updateActiveDirectoryResolverGroupRule(
+          managedActiveDirectory.name,
+          managedActiveDirectory.resolverRuleName,
+          activeDirectory.dnsIpAddresses,
+        );
+
+        // Configure managed active directory using provisioned EC2 instance user data
+        this.configureManagedActiveDirectory({
+          managedActiveDirectory,
+          activeDirectory,
+          adminSecretArn,
+          adSecretAccountId: madAdminSecretAccountId,
+          adSecretRegion: madAdminSecretRegion,
+          sharedAccountNames,
+          madInstanceSubnetId: madInstanceSubnetId!,
+          vpcId: madVpcLookup.vpcId,
+        });
+      }
+    }
+  }
+
+  /**
+   * Function to update resolver rule with MAD dns ips
+   * @param directoryName
+   * @param resolverRuleName
+   * @param dnsIpAddresses
+   */
+  private updateActiveDirectoryResolverGroupRule(
+    directoryName: string,
+    resolverRuleName: string,
+    dnsIpAddresses: string[],
+  ) {
+    Logger.info(`[network-associations-stack] Updating resolver group for directory ${directoryName}`);
+    new ActiveDirectoryResolverRule(this, `${pascalCase(directoryName)}ResolverRule`, {
+      route53ResolverRuleName: resolverRuleName,
+      targetIps: dnsIpAddresses,
+      roleName: `AWSAccelerator-MAD-${resolverRuleName}`,
+      lambdaKmsKey: this.lambdaKey,
+      cloudWatchLogsKmsKey: this.cloudwatchKey,
+      cloudWatchLogRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
+    });
+
+    // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `${this.stackName}/${pascalCase(directoryName)}ResolverRule/UpdateResolverRuleFunction/ServiceRole/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'CDK created IAM user, role, or group.',
+        },
+      ],
+    );
+
+    // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `${this.stackName}/${pascalCase(
+        directoryName,
+      )}ResolverRule/UpdateResolverRuleProvider/framework-onEvent/ServiceRole/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'CDK created IAM user, role, or group.',
+        },
+      ],
+    );
+
+    // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `${this.stackName}/${pascalCase(
+        directoryName,
+      )}ResolverRule/UpdateResolverRuleFunction/ServiceRole/DefaultPolicy/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'CDK created IAM service role entity.',
+        },
+      ],
+    );
+
+    // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `${this.stackName}/${pascalCase(
+        directoryName,
+      )}ResolverRule/UpdateResolverRuleProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'CDK created IAM service role entity.',
+        },
+      ],
+    );
+  }
+
+  /**
+   * Function to configure MAD
+   * @param managedActiveDirectory
+   */
+  private configureManagedActiveDirectory(props: {
+    managedActiveDirectory: ManagedActiveDirectoryConfig;
+    activeDirectory: ActiveDirectory;
+    adminSecretArn: string;
+    adSecretAccountId: string;
+    adSecretRegion: string;
+    sharedAccountNames: string[];
+    madInstanceSubnetId: string;
+    vpcId: string;
+  }) {
+    if (props.managedActiveDirectory.activeDirectoryConfigurationInstance) {
+      const adInstanceConfig = props.managedActiveDirectory.activeDirectoryConfigurationInstance;
+      const inboundRules: cdk.aws_ec2.CfnSecurityGroup.IngressProperty[] = [];
+
+      for (const securityGroupInboundSource of adInstanceConfig.securityGroupInboundSources) {
+        inboundRules.push({ ipProtocol: 'tcp', cidrIp: securityGroupInboundSource, fromPort: 3389, toPort: 3389 });
+        inboundRules.push({ ipProtocol: 'tcp', cidrIp: securityGroupInboundSource, fromPort: 443, toPort: 443 });
+      }
+
+      const securityGroup = new cdk.aws_ec2.CfnSecurityGroup(
+        this,
+        `${pascalCase(props.managedActiveDirectory.name)}SecurityGroup`,
+        {
+          groupDescription: `${pascalCase(
+            props.managedActiveDirectory.name,
+          )} managed active directory instance security group`,
+          securityGroupEgress: [{ ipProtocol: '-1', cidrIp: '0.0.0.0/0' }],
+          securityGroupIngress: inboundRules,
+          groupName: `${props.managedActiveDirectory.name}_mad_instance_sg`,
+          vpcId: props.vpcId,
+          tags: [
+            { key: 'Name', value: `${props.managedActiveDirectory.name}_mad_instance_sg` },
+            {
+              key: 'Description',
+              value: `Security group for ${props.managedActiveDirectory.name} managed active directory instance`,
+            },
+          ],
+        },
+      );
+
+      const userDataScripts: UserDataScriptsType[] = [];
+      if (adInstanceConfig.userDataScripts.length > 0) {
+        for (const userDataScript of adInstanceConfig.userDataScripts) {
+          userDataScripts.push({
+            name: userDataScript.scriptName,
+            path: path.join(this.props.configDirPath, userDataScript.scriptFilePath),
+          });
+        }
+      }
+
+      const secretKey = new KeyLookup(this, 'SecretsKmsKeyLookup', {
+        accountId: props.adSecretAccountId,
+        keyRegion: props.adSecretRegion,
+        roleName: AcceleratorStack.ACCELERATOR_CROSS_ACCOUNT_SECRETS_KMS_ARN_PARAMETER_ROLE_NAME,
+        keyArnParameterName: AcceleratorStack.ACCELERATOR_SECRET_MANAGER_KEY_ARN_PARAMETER_NAME,
+        logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
+      }).getKey();
+
+      const activeDirectoryConfiguration = new ActiveDirectoryConfiguration(
+        this,
+        `${pascalCase(props.managedActiveDirectory.name)}ConfigInstance`,
+        {
+          instanceType: adInstanceConfig.instanceType,
+          imagePath: adInstanceConfig.imagePath,
+          managedActiveDirectoryName: props.managedActiveDirectory.name,
+          managedActiveDirectorySecretAccountId: props.adSecretAccountId,
+          managedActiveDirectorySecretRegion: props.adSecretRegion,
+          dnsName: props.managedActiveDirectory.dnsName,
+          netBiosDomainName: props.managedActiveDirectory.netBiosDomainName,
+          adminPwdSecretArn: props.adminSecretArn,
+          secretKeyArn: secretKey.keyArn,
+          subnetId: props.madInstanceSubnetId,
+          securityGroupId: securityGroup.ref,
+          instanceRoleName: adInstanceConfig.instanceRole,
+          userDataScripts,
+          adGroups: adInstanceConfig.adGroups,
+          adPerAccountGroups: adInstanceConfig.adPerAccountGroups,
+          adConnectorGroup: adInstanceConfig.adConnectorGroup,
+          adUsers: adInstanceConfig.adUsers,
+          adPasswordPolicy: adInstanceConfig.adPasswordPolicy,
+          accountNames: props.sharedAccountNames,
+        },
+      );
+
+      activeDirectoryConfiguration.node.addDependency(props.activeDirectory);
+
+      // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+      NagSuppressions.addResourceSuppressionsByPath(
+        this,
+        `${this.stackName}/` +
+          pascalCase(props.managedActiveDirectory.name) +
+          'ConfigInstance/' +
+          pascalCase(props.managedActiveDirectory.name) +
+          'InstanceRole/Resource',
+        [
+          {
+            id: 'AwsSolutions-IAM4',
+            reason: 'AD config instance needs to access user data bucket and bucket encryption key.',
+          },
+        ],
+      );
+
+      // AwsSolutions-EC28: The EC2 instance/AutoScaling launch configuration does not have detailed monitoring enabled
+      NagSuppressions.addResourceSuppressionsByPath(
+        this,
+        `${this.stackName}/` +
+          pascalCase(props.managedActiveDirectory.name) +
+          'ConfigInstance/' +
+          pascalCase(props.managedActiveDirectory.name) +
+          'InstanceRole/Instance',
+        [
+          {
+            id: 'AwsSolutions-EC28',
+            reason: 'AD config instance just used to configure MAD through user data.',
+          },
+        ],
+      );
+
+      // AwsSolutions-EC29: The EC2 instance is not part of an ASG and has Termination Protection disabled
+      NagSuppressions.addResourceSuppressionsByPath(
+        this,
+        `${this.stackName}/` +
+          pascalCase(props.managedActiveDirectory.name) +
+          'ConfigInstance/' +
+          pascalCase(props.managedActiveDirectory.name) +
+          'InstanceRole/Instance',
+        [
+          {
+            id: 'AwsSolutions-EC29',
+            reason: 'AD config instance just used to configure MAD through user data.',
+          },
+        ],
+      );
+
+      // AwsSolutions-EC28: The EC2 instance/AutoScaling launch configuration does not have detailed monitoring enabled
+      NagSuppressions.addResourceSuppressionsByPath(
+        this,
+        `${this.stackName}/` +
+          pascalCase(props.managedActiveDirectory.name) +
+          'ConfigInstance/' +
+          pascalCase(props.managedActiveDirectory.name) +
+          'Instance',
+        [
+          {
+            id: 'AwsSolutions-EC28',
+            reason: 'AD config instance just used to configure MAD through user data.',
+          },
+        ],
+      );
+
+      // AwsSolutions-EC29: The EC2 instance is not part of an ASG and has Termination Protection disabled.
+      NagSuppressions.addResourceSuppressionsByPath(
+        this,
+        `${this.stackName}/` +
+          pascalCase(props.managedActiveDirectory.name) +
+          'ConfigInstance/' +
+          pascalCase(props.managedActiveDirectory.name) +
+          'Instance',
+        [
+          {
+            id: 'AwsSolutions-EC29',
+            reason: 'AD config instance just used to configure MAD through user data.',
+          },
+        ],
+      );
+
+      for (const adUser of adInstanceConfig.adUsers ?? []) {
+        // AwsSolutions-SMG4: The secret does not have automatic rotation scheduled
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/` +
+            pascalCase(props.managedActiveDirectory.name) +
+            'ConfigInstance/' +
+            pascalCase(adUser.name) +
+            'Secret/Resource',
+          [
+            {
+              id: 'AwsSolutions-SMG4',
+              reason: 'AD user secret.',
+            },
+          ],
+        );
       }
     }
   }

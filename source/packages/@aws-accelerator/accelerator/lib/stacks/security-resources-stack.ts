@@ -31,9 +31,7 @@ import {
 } from '@aws-accelerator/constructs';
 import * as cdk_extensions from '@aws-cdk-extensions/cdk-extensions';
 
-import { Logger } from '../logger';
 import { AcceleratorStack, AcceleratorStackProps } from './accelerator-stack';
-import { KeyStack } from './key-stack';
 
 enum ACCEL_LOOKUP_TYPE {
   KMS = 'KMS',
@@ -57,12 +55,15 @@ interface RemediationParameters {
 }
 
 type CustomConfigRuleType = config.ManagedRule | config.CustomRule | undefined;
+
 /**
  * Security Stack, configures local account security services
  */
 export class SecurityResourcesStack extends AcceleratorStack {
-  readonly auditS3Key: cdk.aws_kms.Key;
+  readonly centralLogS3Key: cdk.aws_kms.IKey;
   readonly cloudwatchKey: cdk.aws_kms.IKey;
+  readonly snsKey: cdk.aws_kms.IKey | undefined;
+  readonly lambdaKey: cdk.aws_kms.IKey;
   readonly auditAccountId: string;
   readonly logArchiveAccountId: string;
   readonly stackProperties: AcceleratorStackProps;
@@ -83,11 +84,12 @@ export class SecurityResourcesStack extends AcceleratorStack {
     // Set Organization Id
     this.setOrganizationId();
 
-    this.auditS3Key = new KeyLookup(this, 'AcceleratorAuditS3Key', {
-      accountId: props.accountsConfig.getAuditAccountId(),
-      roleName: KeyStack.ACCELERATOR_CROSS_ACCOUNT_ACCESS_ROLE_NAME,
-      keyArnParameterName: AcceleratorStack.ACCELERATOR_S3_KEY_ARN_PARAMETER_NAME,
-      logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
+    this.centralLogS3Key = new KeyLookup(this, 'AcceleratorCentralLogS3Key', {
+      accountId: this.props.accountsConfig.getLogArchiveAccountId(),
+      keyRegion: this.props.centralizedLoggingRegion,
+      roleName: CentralLogsBucket.CROSS_ACCOUNT_SSM_PARAMETER_ACCESS_ROLE_NAME,
+      keyArnParameterName: CentralLogsBucket.KEY_ARN_PARAMETER_NAME,
+      logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
     }).getKey();
 
     this.cloudwatchKey = cdk.aws_kms.Key.fromKeyArn(
@@ -98,6 +100,32 @@ export class SecurityResourcesStack extends AcceleratorStack {
         AcceleratorStack.ACCELERATOR_CLOUDWATCH_LOG_KEY_ARN_PARAMETER_NAME,
       ),
     );
+
+    this.lambdaKey = cdk.aws_kms.Key.fromKeyArn(
+      this,
+      'AcceleratorGetLambdaKey',
+      cdk.aws_ssm.StringParameter.valueForStringParameter(
+        this,
+        AcceleratorStack.ACCELERATOR_LAMBDA_KEY_ARN_PARAMETER_NAME,
+      ),
+    );
+
+    // if sns topics defined and this is the log archive account or
+    // sns topics defined and this is a deployment target for sns topics
+    // get sns key
+    if (
+      (props.globalConfig.snsTopics && cdk.Stack.of(this).account === props.accountsConfig.getLogArchiveAccountId()) ||
+      (props.globalConfig.snsTopics && this.isIncluded(props.globalConfig.snsTopics.deploymentTargets))
+    ) {
+      this.snsKey = cdk.aws_kms.Key.fromKeyArn(
+        this,
+        'AcceleratorGetSnsKey',
+        cdk.aws_ssm.StringParameter.valueForStringParameter(
+          this,
+          AcceleratorStack.ACCELERATOR_SNS_TOPIC_KEY_ARN_PARAMETER_NAME,
+        ),
+      );
+    }
 
     // AWS Config - Set up recorder and delivery channel, only if Control Tower
     // is not being used. Else the Control Tower SCP will block these calls from
@@ -127,17 +155,14 @@ export class SecurityResourcesStack extends AcceleratorStack {
     //
     for (const metricSetItem of props.securityConfig.cloudWatch.metricSets ?? []) {
       if (!metricSetItem.regions?.includes(cdk.Stack.of(this).region)) {
-        Logger.info(`[security-resources-stack] Current region not explicity specified for metric item, skip`);
         continue;
       }
 
       if (!this.isIncluded(metricSetItem.deploymentTargets)) {
-        Logger.info(`[security-resources-stack] Item excluded`);
         continue;
       }
 
       for (const metricItem of metricSetItem.metrics ?? []) {
-        Logger.info(`[security-resources-stack] Creating CloudWatch metric filter ${metricItem.filterName}`);
         const metricFilter = new cdk.aws_logs.MetricFilter(this, pascalCase(metricItem.filterName), {
           logGroup: cdk.aws_logs.LogGroup.fromLogGroupName(
             this,
@@ -164,12 +189,175 @@ export class SecurityResourcesStack extends AcceleratorStack {
     //
     // SessionManager Configuration
     //
-    this.setupSessionManager();
+    if (
+      !this.isAccountExcluded(props.globalConfig.logging.sessionManager.excludeAccounts) &&
+      !this.isRegionExcluded(props.globalConfig.logging.sessionManager.excludeRegions)
+    ) {
+      this.setupSessionManager();
+    }
+
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${this.stackName}/SsmSessionManagerSettings/SessionPolicy${cdk.Stack.of(this).region}/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'Allows only specific log group',
+        },
+      ],
+    );
 
     // SecurityHub Log event to CloudWatch
     this.securityHubEventForwardToLogs();
 
-    Logger.info('[security-resources-stack] Completed stack synthesis');
+    //
+    // Create Managed Active Directory secrets
+    //
+    this.createManagedActiveDirectorySecrets();
+  }
+
+  /**
+   * Function to create Managed active directory secrets for admin user and ad users
+   */
+  private createManagedActiveDirectorySecrets() {
+    for (const managedActiveDirectory of this.props.iamConfig.managedActiveDirectories ?? []) {
+      const madAccountId = this.props.accountsConfig.getAccountId(managedActiveDirectory.account);
+      const madRegion = managedActiveDirectory.region;
+
+      const secretName = `/accelerator/ad-user/${
+        managedActiveDirectory.name
+      }/${this.props.iamConfig.getManageActiveDirectoryAdminSecretName(managedActiveDirectory.name)}`;
+      const madAdminSecretAccountId = this.props.accountsConfig.getAccountId(
+        this.props.iamConfig.getManageActiveDirectorySecretAccountName(managedActiveDirectory.name),
+      );
+      const madAdminSecretRegion = this.props.iamConfig.getManageActiveDirectorySecretRegion(
+        managedActiveDirectory.name,
+      );
+
+      if (cdk.Stack.of(this).account == madAdminSecretAccountId && cdk.Stack.of(this).region == madAdminSecretRegion) {
+        const key = cdk.aws_kms.Key.fromKeyArn(
+          this,
+          pascalCase(`${managedActiveDirectory.name}AdminSecretKeyLookup`),
+          cdk.aws_ssm.StringParameter.valueForStringParameter(
+            this,
+            AcceleratorStack.ACCELERATOR_SECRET_MANAGER_KEY_ARN_PARAMETER_NAME,
+          ),
+        );
+        const adminSecret = new cdk.aws_secretsmanager.Secret(
+          this,
+          pascalCase(`${managedActiveDirectory.name}AdminSecret`),
+          {
+            generateSecretString: {
+              passwordLength: 16,
+              requireEachIncludedType: true,
+            },
+            secretName,
+            encryptionKey: key,
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+          },
+        );
+
+        // AwsSolutions-SMG4: The secret does not have automatic rotation scheduled
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/${pascalCase(managedActiveDirectory.name)}AdminSecret/Resource`,
+          [
+            {
+              id: 'AwsSolutions-SMG4',
+              reason: 'Managed AD secret.',
+            },
+          ],
+        );
+
+        new cdk.aws_ssm.StringParameter(this, pascalCase(`${managedActiveDirectory.name}AdminSecretArnParameter`), {
+          parameterName: `/accelerator/secrets-manager/${managedActiveDirectory.name}/admin-secret/secret-arn`,
+          stringValue: adminSecret.secretArn,
+        });
+
+        // Attach MAD creation stack role to have access to the secret
+        adminSecret.addToResourcePolicy(
+          new cdk.aws_iam.PolicyStatement({
+            effect: cdk.aws_iam.Effect.ALLOW,
+            principals: [
+              new cdk.aws_iam.ArnPrincipal(
+                `arn:${
+                  cdk.Stack.of(this).partition
+                }:iam::${madAccountId}:role/cdk-accel-cfn-exec-role-${madAccountId}-${madRegion}`,
+              ),
+            ],
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: ['*'],
+          }),
+        );
+
+        if (managedActiveDirectory.activeDirectoryConfigurationInstance) {
+          const activeDirectoryInstance = managedActiveDirectory.activeDirectoryConfigurationInstance;
+
+          const instanceRole = cdk.aws_iam.Role.fromRoleArn(
+            this,
+            pascalCase(managedActiveDirectory.name) + pascalCase(activeDirectoryInstance.instanceRole),
+            `arn:${cdk.Stack.of(this).partition}:iam::${madAccountId}:role/${activeDirectoryInstance.instanceRole}`,
+          );
+
+          // Attach MAD instance role access to secrets resource policy
+          adminSecret.addToResourcePolicy(
+            new cdk.aws_iam.PolicyStatement({
+              effect: cdk.aws_iam.Effect.ALLOW,
+              principals: [new cdk.aws_iam.ArnPrincipal(instanceRole.roleArn)],
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: ['*'],
+            }),
+          );
+
+          // Create ad user secrets for instance user data script
+          for (const adUser of activeDirectoryInstance.adUsers ?? []) {
+            const secret = new cdk.aws_secretsmanager.Secret(this, pascalCase(`${adUser.name}Secret`), {
+              description: `Password for Managed Active Directory user ${adUser.name}`,
+              generateSecretString: {
+                passwordLength: 16,
+                requireEachIncludedType: true,
+              },
+              secretName: `/accelerator/ad-user/${managedActiveDirectory.name}/${adUser.name}`,
+              encryptionKey: key,
+              removalPolicy: cdk.RemovalPolicy.RETAIN,
+            });
+
+            // AwsSolutions-SMG4: The secret does not have automatic rotation scheduled
+            NagSuppressions.addResourceSuppressionsByPath(
+              this,
+              `${this.stackName}/${pascalCase(adUser.name)}Secret/Resource`,
+              [
+                {
+                  id: 'AwsSolutions-SMG4',
+                  reason: 'Managed AD secret.',
+                },
+              ],
+            );
+
+            new cdk.aws_ssm.StringParameter(
+              this,
+              pascalCase(`${managedActiveDirectory.name}${pascalCase(adUser.name)}SecretArnParameter`),
+              {
+                parameterName: `/accelerator/secrets-manager/${managedActiveDirectory.name}/${pascalCase(
+                  adUser.name,
+                )}-secret/secret-arn`,
+                stringValue: adminSecret.secretArn,
+              },
+            );
+
+            // Attach MAD instance role access to secret resource policy
+            secret.addToResourcePolicy(
+              new cdk.aws_iam.PolicyStatement({
+                effect: cdk.aws_iam.Effect.ALLOW,
+                principals: [new cdk.aws_iam.ArnPrincipal(instanceRole.roleArn)],
+                actions: ['secretsmanager:GetSecretValue'],
+                resources: ['*'],
+              }),
+            );
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -178,18 +366,14 @@ export class SecurityResourcesStack extends AcceleratorStack {
   private configureCloudwatchAlarm() {
     for (const alarmSetItem of this.props.securityConfig.cloudWatch.alarmSets ?? []) {
       if (!alarmSetItem.regions?.includes(cdk.Stack.of(this).region)) {
-        Logger.info(`[security-resources-stack] Current region not explicity specified for alarm item, skip`);
         continue;
       }
 
       if (!this.isIncluded(alarmSetItem.deploymentTargets)) {
-        Logger.info(`[security-resources-stack] Item excluded`);
         continue;
       }
 
       for (const alarmItem of alarmSetItem.alarms ?? []) {
-        Logger.info(`[security-resources-stack] Creating CloudWatch alarm ${alarmItem.alarmName}`);
-
         const alarm = new cdk.aws_cloudwatch.Alarm(this, pascalCase(alarmItem.alarmName), {
           alarmName: alarmItem.alarmName,
           alarmDescription: alarmItem.alarmDescription,
@@ -205,21 +389,39 @@ export class SecurityResourcesStack extends AcceleratorStack {
           treatMissingData: this.getTreatMissingData(alarmItem.treatMissingData),
         });
 
-        alarm.addAlarmAction(
-          new cdk.aws_cloudwatch_actions.SnsAction(
-            cdk.aws_sns.Topic.fromTopicArn(
-              this,
-              `${pascalCase(alarmItem.alarmName)}Topic`,
-              cdk.Stack.of(this).formatArn({
-                service: 'sns',
-                region: cdk.Stack.of(this).region,
-                account: this.props.accountsConfig.getAuditAccountId(),
-                resource: `aws-accelerator-${alarmItem.snsAlertLevel}Notifications`,
-                arnFormat: cdk.ArnFormat.NO_RESOURCE_NAME,
-              }),
+        if (this.props.globalConfig.snsTopics) {
+          alarm.addAlarmAction(
+            new cdk.aws_cloudwatch_actions.SnsAction(
+              cdk.aws_sns.Topic.fromTopicArn(
+                this,
+                `${pascalCase(alarmItem.alarmName)}Topic`,
+                cdk.Stack.of(this).formatArn({
+                  service: 'sns',
+                  region: cdk.Stack.of(this).region,
+                  account: cdk.Stack.of(this).account,
+                  resource: `aws-accelerator-${alarmItem.snsTopicName}`,
+                  arnFormat: cdk.ArnFormat.NO_RESOURCE_NAME,
+                }),
+              ),
             ),
-          ),
-        );
+          );
+        } else {
+          alarm.addAlarmAction(
+            new cdk.aws_cloudwatch_actions.SnsAction(
+              cdk.aws_sns.Topic.fromTopicArn(
+                this,
+                `${pascalCase(alarmItem.alarmName)}Topic`,
+                cdk.Stack.of(this).formatArn({
+                  service: 'sns',
+                  region: cdk.Stack.of(this).region,
+                  account: this.props.accountsConfig.getAuditAccountId(),
+                  resource: `aws-accelerator-${alarmItem.snsAlertLevel}Notifications`,
+                  arnFormat: cdk.ArnFormat.NO_RESOURCE_NAME,
+                }),
+              ),
+            ),
+          );
+        }
       }
     }
   }
@@ -291,7 +493,7 @@ export class SecurityResourcesStack extends AcceleratorStack {
 
       if (this.props.securityConfig.awsConfig.enableDeliveryChannel) {
         new config.CfnDeliveryChannel(this, 'ConfigDeliveryChannel', {
-          s3BucketName: `${AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX}-${this.logArchiveAccountId}-${this.props.globalConfig.homeRegion}`,
+          s3BucketName: `${AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX}-${this.logArchiveAccountId}-${this.props.centralizedLoggingRegion}`,
           configSnapshotDeliveryProperties: {
             deliveryFrequency: 'One_Hour',
           },
@@ -306,8 +508,6 @@ export class SecurityResourcesStack extends AcceleratorStack {
    * @returns
    */
   private createManagedConfigRule(rule: ConfigRule): CustomConfigRuleType {
-    Logger.info(`[security-resources-stack] Creating managed rule ${rule.name}`);
-
     const resourceTypes: config.ResourceType[] = [];
     for (const resourceType of rule.complianceResourceTypes ?? []) {
       resourceTypes.push(config.ResourceType.of(resourceType));
@@ -332,7 +532,6 @@ export class SecurityResourcesStack extends AcceleratorStack {
    * @returns
    */
   private createCustomConfigRule(rule: ConfigRule): CustomConfigRuleType {
-    Logger.info(`[security-resources-stack] Creating custom rule ${rule.name}`);
     let ruleScope: config.RuleScope | undefined;
 
     if (rule.customRule.triggeringResources.lookupType == 'ResourceTypes') {
@@ -548,8 +747,6 @@ export class SecurityResourcesStack extends AcceleratorStack {
         // Create remediation for config rule
         if (rule.remediation) {
           this.setupConfigRuleRemediation(rule, configRule);
-        } else {
-          Logger.info(`[security-resources-stack] No remediation provided for custom config rule ${rule.name}`);
         }
 
         if (this.configRecorder) {
@@ -563,19 +760,11 @@ export class SecurityResourcesStack extends AcceleratorStack {
    * Function to setup AWS Config rules
    */
   private setupAwsConfigRules() {
-    Logger.info('[security-resources-stack] Evaluating AWS Config rule sets');
-
     for (const ruleSet of this.props.securityConfig.awsConfig.ruleSets) {
       if (!this.isIncluded(ruleSet.deploymentTargets)) {
-        Logger.info('[security-resources-stack] Item excluded');
         continue;
       }
 
-      Logger.info(
-        `[security-resources-stack] Account (${
-          cdk.Stack.of(this).account
-        }) should be included, deploying AWS Config Rules`,
-      );
       this.createAwsConfigRules(ruleSet);
     }
   }
@@ -923,70 +1112,62 @@ export class SecurityResourcesStack extends AcceleratorStack {
       this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs ||
       this.props.globalConfig.logging.sessionManager.sendToS3
     ) {
-      Logger.info(`[security-resources-stack] Creating Session Manager Logging Resources`);
       // Set up Session Manager Logging
-      if (
-        !this.isAccountExcluded(this.props.globalConfig.logging.sessionManager.excludeAccounts ?? []) ||
-        !this.isRegionExcluded(this.props.globalConfig.logging.sessionManager.excludeRegions ?? [])
-      ) {
-        const centralLogsBucketKey = new KeyLookup(this, 'CentralLogsBucketKey', {
-          accountId: this.props.accountsConfig.getLogArchiveAccountId(),
-          keyRegion: this.props.globalConfig.homeRegion,
-          roleName: CentralLogsBucket.CROSS_ACCOUNT_SSM_PARAMETER_ACCESS_ROLE_NAME,
-          keyArnParameterName: CentralLogsBucket.KEY_ARN_PARAMETER_NAME,
-          logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
-        }).getKey();
+      new SsmSessionManagerSettings(this, 'SsmSessionManagerSettings', {
+        s3BucketName: `${
+          AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX
+        }-${this.props.accountsConfig.getLogArchiveAccountId()}-${this.props.centralizedLoggingRegion}`,
+        s3KeyPrefix: `session/${cdk.Aws.ACCOUNT_ID}/${cdk.Stack.of(this).region}`,
+        s3BucketKeyArn: this.centralLogS3Key.keyArn,
+        sendToCloudWatchLogs: this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs,
+        sendToS3: this.props.globalConfig.logging.sessionManager.sendToS3,
+        cloudWatchEncryptionEnabled:
+          this.props.partition !== 'aws-us-gov' && this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs,
+        attachPolicyToIamRoles: this.props.globalConfig.logging.sessionManager.attachPolicyToIamRoles,
+        cloudWatchEncryptionKey: this.cloudwatchKey,
+        constructLoggingKmsKey: this.cloudwatchKey,
+        logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
+        region: cdk.Stack.of(this).region,
+      });
 
-        new SsmSessionManagerSettings(this, 'SsmSessionManagerSettings', {
-          s3BucketName: `${
-            AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX
-          }-${this.props.accountsConfig.getLogArchiveAccountId()}-${this.props.globalConfig.homeRegion}`,
-          s3KeyPrefix: `session/${cdk.Aws.ACCOUNT_ID}/${cdk.Stack.of(this).region}`,
-          s3BucketKeyArn: centralLogsBucketKey.keyArn,
-          sendToCloudWatchLogs: this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs,
-          sendToS3: this.props.globalConfig.logging.sessionManager.sendToS3,
-          cloudWatchEncryptionEnabled:
-            this.props.partition !== 'aws-us-gov' &&
-            this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs,
-          cloudWatchEncryptionKey: this.cloudwatchKey,
-          constructLoggingKmsKey: this.cloudwatchKey,
-          logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
-        });
+      // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
+      // rule suppression with evidence for this permission.
+      NagSuppressions.addResourceSuppressionsByPath(
+        this,
+        `${this.stackName}/SsmSessionManagerSettings/SessionManagerEC2Policy/Resource`,
+        [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason: 'Policy needed access to all S3 objects for the account to put objects into the access log bucket',
+          },
+        ],
+      );
 
-        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
-        // rule suppression with evidence for this permission.
-        NagSuppressions.addResourceSuppressionsByPath(
-          this,
-          `${this.stackName}/SsmSessionManagerSettings/SessionManagerEC2Policy/Resource`,
-          [
-            {
-              id: 'AwsSolutions-IAM5',
-              reason:
-                'Policy needed access to all S3 objects for the account to put objects into the access log bucket',
-            },
-          ],
-        );
-
-        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies.
-        // rule suppression with evidence for this permission.
-        NagSuppressions.addResourceSuppressionsByPath(
-          this,
-          `${this.stackName}/SsmSessionManagerSettings/SessionManagerEC2Role/Resource`,
-          [
-            {
-              id: 'AwsSolutions-IAM4',
-              reason: 'Create an IAM managed Policy for users to be able to use Session Manager with KMS encryption',
-            },
-          ],
-        );
-      }
+      // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies.
+      // rule suppression with evidence for this permission.
+      NagSuppressions.addResourceSuppressionsByPath(
+        this,
+        `${this.stackName}/SsmSessionManagerSettings/SessionManagerEC2Role/Resource`,
+        [
+          {
+            id: 'AwsSolutions-IAM4',
+            reason: 'Create an IAM managed Policy for users to be able to use Session Manager with KMS encryption',
+          },
+        ],
+      );
     }
   }
 
   private securityHubEventForwardToLogs() {
     if (this.props.securityConfig.centralSecurityServices.securityHub.enable) {
-      new SecurityHubEventsLog(this, 'SecurityHubEventsLog');
-      Logger.debug(`Stack: ${this.stackName}`);
+      new SecurityHubEventsLog(this, 'SecurityHubEventsLog', {
+        snsTopicArn: `arn:${cdk.Stack.of(this).partition}:sns:${cdk.Stack.of(this).region}:${
+          cdk.Stack.of(this).account
+        }:aws-accelerator-${this.props.securityConfig.centralSecurityServices.securityHub.snsTopicName}`,
+        snsKmsKey: this.snsKey,
+        notificationLevel: this.props.securityConfig.centralSecurityServices.securityHub.notificationLevel,
+        lambdaKey: this.lambdaKey,
+      });
       NagSuppressions.addResourceSuppressionsByPath(
         this,
         `/${this.stackName}/SecurityHubEventsLog/SecurityHubEventsFunction/ServiceRole/Resource`,
@@ -1023,8 +1204,6 @@ export class SecurityResourcesStack extends AcceleratorStack {
   }
 
   private configureAccountCloudTrails() {
-    Logger.debug('[logging-stack] In Configure Account CloudTrails');
-
     for (const accountTrail of this.stackProperties.globalConfig.logging.cloudtrail.accountTrails ?? []) {
       if (!accountTrail.regions?.includes(cdk.Stack.of(this).region)) {
         continue;
@@ -1035,7 +1214,6 @@ export class SecurityResourcesStack extends AcceleratorStack {
       }
 
       const trailName = `AWSAccelerator-CloudTrail-${accountTrail.name}`;
-      Logger.info(`[logging-stack] Adding Account CloudTrail ${trailName}`);
 
       let accountTrailCloudWatchLogGroup: cdk.aws_logs.LogGroup | undefined = undefined;
       if (accountTrail.settings.sendToCloudWatchLogs) {
@@ -1057,15 +1235,13 @@ export class SecurityResourcesStack extends AcceleratorStack {
         bucket: cdk.aws_s3.Bucket.fromBucketName(
           this,
           'CloudTrailLogBucket',
-          `aws-accelerator-cloudtrail-${this.stackProperties.accountsConfig.getAuditAccountId()}-${
-            cdk.Stack.of(this).region
-          }`,
+          `${AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX}-${this.logArchiveAccountId}-${this.props.centralizedLoggingRegion}`,
         ),
         s3KeyPrefix: `cloudtrail-${accountTrail.name}`,
         cloudWatchLogGroup: accountTrailCloudWatchLogGroup,
         cloudWatchLogsRetention: this.stackProperties.globalConfig.cloudwatchLogRetentionInDays,
         enableFileValidation: true,
-        encryptionKey: this.auditS3Key,
+        encryptionKey: this.centralLogS3Key,
         includeGlobalServiceEvents: accountTrail.settings.globalServiceEvents ?? false,
         isMultiRegionTrail: accountTrail.settings.multiRegionTrail ?? false,
         isOrganizationTrail: false,

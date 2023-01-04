@@ -6,7 +6,9 @@ centralSecurityServices:
   s3PublicAccessBlock:
     enable: true
     excludeAccounts: []
-  snsSubscriptions: []
+  scpRevertChangesConfig:
+    enable: true
+    snsTopicName: Security
   macie:
     enable: false
     excludeRegions: []
@@ -20,10 +22,12 @@ centralSecurityServices:
       excludeRegions: []
     exportConfiguration:
       enable: false
+      overrideExisting: false
       destinationType: S3
       exportFrequency: FIFTEEN_MINUTES
   securityHub:
     enable: false
+    regionAggregation: false
     excludeRegions: []
     standards: []
   ssmAutomation:
@@ -48,3 +52,5 @@ awsConfig:
 cloudWatch:
   metricSets: []
   alarmSets: []
+keyManagementService:
+  keySets: []

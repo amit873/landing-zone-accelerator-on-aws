@@ -15,13 +15,13 @@ import * as fs from 'fs';
 import * as yaml from 'js-yaml';
 import * as path from 'path';
 
-import { AccountsConfig } from './accounts-config';
 import * as t from './common-types';
-import { OrganizationConfig } from './organization-config';
+import * as CustomizationsConfig from './customizations-config';
 
 /**
  * Network configuration items.
  */
+
 export class NetworkConfigTypes {
   static readonly defaultVpcsConfig = t.interface({
     delete: t.boolean,
@@ -37,12 +37,25 @@ export class NetworkConfigTypes {
     directConnectGatewayName: t.nonEmptyString,
   });
 
+  static readonly transitGatewayRouteTableVpnEntryConfig = t.interface({
+    vpnConnectionName: t.nonEmptyString,
+  });
+
+  static readonly transitGatewayRouteTableTgwPeeringEntryConfig = t.interface({
+    transitGatewayPeeringName: t.nonEmptyString,
+  });
+
   static readonly transitGatewayRouteEntryConfig = t.interface({
     destinationCidrBlock: t.optional(t.nonEmptyString),
     destinationPrefixList: t.optional(t.nonEmptyString),
     blackhole: t.optional(t.boolean),
     attachment: t.optional(
-      t.union([this.transitGatewayRouteTableVpcEntryConfig, this.transitGatewayRouteTableDxGatewayEntryConfig]),
+      t.union([
+        this.transitGatewayRouteTableVpcEntryConfig,
+        this.transitGatewayRouteTableDxGatewayEntryConfig,
+        this.transitGatewayRouteTableVpnEntryConfig,
+        this.transitGatewayRouteTableTgwPeeringEntryConfig,
+      ]),
     ),
   });
 
@@ -50,6 +63,29 @@ export class NetworkConfigTypes {
     name: t.nonEmptyString,
     tags: t.optional(t.array(t.tag)),
     routes: t.array(this.transitGatewayRouteEntryConfig),
+  });
+
+  static readonly transitGatewayPeeringRequesterConfig = t.interface({
+    transitGatewayName: t.nonEmptyString,
+    account: t.nonEmptyString,
+    region: t.region,
+    routeTableAssociations: t.nonEmptyString,
+    tags: t.optional(t.array(t.tag)),
+  });
+
+  static readonly transitGatewayPeeringAccepterConfig = t.interface({
+    transitGatewayName: t.nonEmptyString,
+    account: t.nonEmptyString,
+    region: t.region,
+    routeTableAssociations: t.nonEmptyString,
+    autoAccept: t.optional(t.boolean),
+    applyTags: t.optional(t.boolean),
+  });
+
+  static readonly transitGatewayPeeringConfig = t.interface({
+    name: t.nonEmptyString,
+    requester: NetworkConfigTypes.transitGatewayPeeringRequesterConfig,
+    accepter: NetworkConfigTypes.transitGatewayPeeringAccepterConfig,
   });
 
   static readonly transitGatewayConfig = t.interface({
@@ -155,13 +191,15 @@ export class NetworkConfigTypes {
       'gatewayLoadBalancerEndpoint',
       'networkInterface',
       'networkFirewall',
+      'virtualPrivateGateway',
+      'vpcPeering',
     ],
     'Value should be a route table target type',
   );
 
   static readonly gatewayRouteTableTypeEnum = t.enums(
     'GatewayType',
-    ['internetGateway', 'virtualGateway'],
+    ['internetGateway', 'virtualPrivateGateway'],
     'Value should be a route table gateway type.',
   );
 
@@ -410,6 +448,43 @@ export class NetworkConfigTypes {
     localGateway: t.optional(this.localGatewayConfig),
   });
 
+  static readonly vpnTunnelOptionsSpecificationsConfig = t.interface({
+    preSharedKey: t.optional(t.nonEmptyString),
+    tunnelInsideCidr: t.optional(t.nonEmptyString),
+  });
+
+  static readonly vpnConnectionConfig = t.interface({
+    name: t.nonEmptyString,
+    transitGateway: t.optional(t.nonEmptyString),
+    routeTableAssociations: t.optional(t.array(t.nonEmptyString)),
+    routeTablePropagations: t.optional(t.array(t.nonEmptyString)),
+    staticRoutesOnly: t.optional(t.boolean),
+    vpc: t.optional(t.nonEmptyString),
+    tunnelSpecifications: t.optional(t.array(this.vpnTunnelOptionsSpecificationsConfig)),
+    tags: t.optional(t.array(t.tag)),
+  });
+
+  static readonly customerGatewayConfig = t.interface({
+    name: t.nonEmptyString,
+    account: t.nonEmptyString,
+    region: t.region,
+    ipAddress: t.nonEmptyString,
+    asn: t.number,
+    tags: t.optional(t.array(t.tag)),
+    vpnConnections: t.optional(t.array(this.vpnConnectionConfig)),
+  });
+
+  static readonly virtualPrivateGatewayConfig = t.interface({
+    asn: t.optional(t.number),
+  });
+
+  static readonly loadBalancersConfig = t.interface({
+    applicationLoadBalancers: t.optional(
+      t.array(CustomizationsConfig.CustomizationsConfigTypes.applicationLoadBalancerConfig),
+    ),
+    networkLoadBalancers: t.optional(t.array(CustomizationsConfig.CustomizationsConfigTypes.networkLoadBalancerConfig)),
+  });
+
   static readonly vpcConfig = t.interface({
     name: t.nonEmptyString,
     account: t.nonEmptyString,
@@ -436,14 +511,17 @@ export class NetworkConfigTypes {
     transitGatewayAttachments: t.optional(t.array(this.transitGatewayAttachmentConfig)),
     tags: t.optional(t.array(t.tag)),
     outposts: t.optional(t.array(this.outpostsConfig)),
+    virtualPrivateGateway: t.optional(this.virtualPrivateGatewayConfig),
     vpcFlowLogs: t.optional(t.vpcFlowLogsConfig),
+    loadBalancers: t.optional(this.loadBalancersConfig),
+    targetGroups: t.optional(t.array(CustomizationsConfig.CustomizationsConfigTypes.targetGroupItem)),
   });
 
   static readonly vpcTemplatesConfig = t.interface({
     name: t.nonEmptyString,
     region: t.region,
     deploymentTargets: t.deploymentTargets,
-    ipamAllocations: t.array(this.ipamAllocationConfig),
+    cidrs: t.optional(t.array(t.nonEmptyString)),
     dhcpOptions: t.optional(t.nonEmptyString),
     dnsFirewallRuleGroups: t.optional(t.array(this.vpcDnsFirewallAssociationConfig)),
     enableDnsHostnames: t.optional(t.boolean),
@@ -452,6 +530,7 @@ export class NetworkConfigTypes {
     instanceTenancy: t.optional(this.instanceTenancyTypeEnum),
     interfaceEndpoints: t.optional(this.interfaceEndpointConfig),
     internetGateway: t.optional(t.boolean),
+    ipamAllocations: t.optional(t.array(this.ipamAllocationConfig)),
     natGateways: t.optional(t.array(this.natGatewayConfig)),
     useCentralEndpoints: t.optional(t.boolean),
     securityGroups: t.optional(t.array(this.securityGroupConfig)),
@@ -462,8 +541,11 @@ export class NetworkConfigTypes {
     routeTables: t.optional(t.array(this.routeTableConfig)),
     subnets: t.optional(t.array(this.subnetConfig)),
     transitGatewayAttachments: t.optional(t.array(this.transitGatewayAttachmentConfig)),
+    virtualPrivateGateway: t.optional(this.virtualPrivateGatewayConfig),
     tags: t.optional(t.array(t.tag)),
     vpcFlowLogs: t.optional(t.vpcFlowLogsConfig),
+    loadBalancers: t.optional(this.loadBalancersConfig),
+    targetGroups: t.optional(t.array(CustomizationsConfig.CustomizationsConfigTypes.targetGroupItem)),
   });
 
   static readonly ruleTypeEnum = t.enums('ResolverRuleType', ['FORWARD', 'RECURSIVE', 'SYSTEM']);
@@ -664,6 +746,7 @@ export class NetworkConfigTypes {
     rulesString: t.optional(t.nonEmptyString),
     statefulRules: t.optional(t.array(this.nfwRuleSourceStatefulRuleConfig)),
     statelessRulesAndCustomActions: t.optional(this.nfwStatelessRulesAndCustomActionsConfig),
+    rulesFile: t.optional(t.nonEmptyString),
   });
 
   static readonly nfwRuleVariableDefinitionConfig = t.interface({
@@ -760,6 +843,7 @@ export class NetworkConfigTypes {
     vpc: t.nonEmptyString,
     crossZoneLoadBalancing: t.optional(t.boolean),
     deletionProtection: t.optional(t.boolean),
+    targetGroup: t.optional(t.nonEmptyString),
     tags: t.optional(t.array(t.tag)),
   });
 
@@ -782,25 +866,63 @@ export class NetworkConfigTypes {
     accountId: t.nonEmptyString,
   });
 
+  static readonly firewallManagerNotificationChannelConfig = t.interface({
+    snsTopic: t.nonEmptyString,
+    region: t.nonEmptyString,
+  });
+
+  static readonly firewallManagerServiceConfig = t.interface({
+    delegatedAdminAccount: t.nonEmptyString,
+    notificationChannels: t.optional(t.array(this.firewallManagerNotificationChannelConfig)),
+  });
+
+  static readonly certificateConfigTypeEnum = t.enums('CertificateTypeEnum', ['import', 'request']);
+
+  static readonly certificateValidationEnum = t.enums('CertificateRequestValidationEnum', ['EMAIL', 'DNS']);
+  static readonly certificateConfig = t.interface({
+    name: t.nonEmptyString,
+    type: this.certificateConfigTypeEnum,
+    privKey: t.optional(t.nonEmptyString),
+    cert: t.optional(t.nonEmptyString),
+    chain: t.optional(t.nonEmptyString),
+    validation: t.optional(this.certificateValidationEnum),
+    domain: t.optional(t.nonEmptyString),
+    san: t.optional(t.array(t.nonEmptyString)),
+    deploymentTargets: t.deploymentTargets,
+  });
+
   static readonly networkConfig = t.interface({
     defaultVpc: this.defaultVpcsConfig,
     endpointPolicies: t.array(this.endpointPolicyConfig),
     transitGateways: t.array(this.transitGatewayConfig),
+    transitGatewayPeering: t.optional(t.array(NetworkConfigTypes.transitGatewayPeeringConfig)),
     vpcs: t.array(this.vpcConfig),
     vpcFlowLogs: t.vpcFlowLogsConfig,
     centralNetworkServices: t.optional(this.centralNetworkServicesConfig),
+    customerGateways: t.optional(t.array(this.customerGatewayConfig)),
     dhcpOptions: t.optional(t.array(this.dhcpOptsConfig)),
     directConnectGateways: t.optional(t.array(this.dxGatewayConfig)),
     prefixLists: t.optional(t.array(this.prefixListConfig)),
     vpcPeering: t.optional(t.array(this.vpcPeeringConfig)),
     vpcTemplates: t.optional(t.array(this.vpcTemplatesConfig)),
     elbAccountIds: t.optional(t.array(this.elbAccountIdsConfig)),
+    firewallManagerService: t.optional(this.firewallManagerServiceConfig),
+    certificates: t.optional(t.array(this.certificateConfig)),
   });
 }
 
 /**
+ * *{@link NetworkConfig} / {@link DefaultVpcsConfig}*
+ *
  * Default VPC configuration.
  * Choose whether or not to delete default VPCs.
+ *
+ * @example
+ * ```
+ * defaultVpcs:
+ *   delete: true
+ *   excludeAccounts: []
+ * ```
  */
 export class DefaultVpcsConfig implements t.TypeOf<typeof NetworkConfigTypes.defaultVpcsConfig> {
   /**
@@ -815,8 +937,16 @@ export class DefaultVpcsConfig implements t.TypeOf<typeof NetworkConfigTypes.def
 }
 
 /**
+ * *{@link NetworkConfig} / {@link TransitGatewayConfig} / {@link TransitGatewayRouteTableConfig} / {@link TransitGatewayRouteEntryConfig} / {@link TransitGatewayRouteTableVpcEntryConfig}*
+ *
  * Transit Gateway VPC entry configuration.
  * Used to define an account and VPC name for Transit Gateway static route entries.
+ *
+ * @example
+ * ```
+ * account: Network
+ * vpcName: Network-Inspection
+ * ```
  */
 export class TransitGatewayRouteTableVpcEntryConfig
   implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteTableVpcEntryConfig>
@@ -832,9 +962,16 @@ export class TransitGatewayRouteTableVpcEntryConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link TransitGatewayConfig} / {@link TransitGatewayRouteTableConfig} / {@link TransitGatewayRouteEntryConfig} / {@link TransitGatewayRouteTableDxGatewayEntryConfig}*
+ *
  * Transit Gateway Direct Connect Gateway entry configuration.
  * Used to define a Direct Connect Gateway attachment for Transit
  * Gateway static routes.
+ *
+ * @example
+ * ```
+ * directConnectGatewayName: Accelerator-DXGW
+ * ```
  */
 export class TransitGatewayRouteTableDxGatewayEntryConfig
   implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteTableDxGatewayEntryConfig>
@@ -849,8 +986,78 @@ export class TransitGatewayRouteTableDxGatewayEntryConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link TransitGatewayConfig} / {@link TransitGatewayRouteTableConfig} / {@link TransitGatewayRouteEntryConfig} / {@link TransitGatewayRouteTableVpnEntryConfig}*
+ *
+ * Transit Gateway VPN entry configuration.
+ * Used to define a VPN attachment for Transit
+ * Gateway static routes.
+ *
+ * @example
+ * ```
+ * vpnConnectionName: accelerator-vpc
+ * ```
+ */
+export class TransitGatewayRouteTableVpnEntryConfig
+  implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteTableVpnEntryConfig>
+{
+  /**
+   * The name of the VPN connection
+   *
+   * @remarks
+   * Note: This is the `name` property of the VPN connection.
+   */
+  readonly vpnConnectionName: string = '';
+}
+
+/**
+ * *{@link NetworkConfig} / {@link TransitGatewayConfig} / {@link TransitGatewayRouteTableConfig} / {@link TransitGatewayRouteEntryConfig} / {@link TransitGatewayRouteTableTgwPeeringEntryConfig}*
+ *
+ * Transit Gateway peering route entry configuration.
+ * Used to define a peering attachment for Transit
+ * Gateway static routes.
+ *
+ * @example
+ * ```
+ * transitGatewayPeeringName: Accelerator-TGW-Peering
+ * ```
+ */
+export class TransitGatewayRouteTableTgwPeeringEntryConfig
+  implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteTableTgwPeeringEntryConfig>
+{
+  /**
+   * The name of the Direct Connect Gateway
+   *
+   * @remarks
+   * Note: This is the `name` property of the Transit Gateway peering connection.
+   */
+  readonly transitGatewayPeeringName: string = '';
+}
+
+/**
+ * *{@link NetworkConfig} / {@link TransitGatewayConfig} / {@link TransitGatewayRouteTableConfig} / {@link TransitGatewayRouteEntryConfig}*
+ *
  * Transit Gateway route entry configuration.
  * Used to define static route entries in a Transit Gateway route table.
+ *
+ * @example
+ * Destination CIDR:
+ * ```
+ * - destinationCidrBlock: 0.0.0.0/0
+ *   attachment:
+ *     account: Network
+ *     vpcName: Network-Inspection
+ * ```
+ * Destination prefix list:
+ * ```
+ * - destinationPrefixList: accelerator-pl
+ *   attachment:
+ *     vpnConnectionName: accelerator-vpn
+ * ```
+ * Blackhole route:
+ * ```
+ * - destinationCidrBlock: 1.1.1.1/32
+ *   blackhole: true
+ * ```
  */
 export class TransitGatewayRouteEntryConfig
   implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteEntryConfig>
@@ -875,17 +1082,27 @@ export class TransitGatewayRouteEntryConfig
    * A Transit Gateway VPC or DX Gateway entry configuration.
    * Leave undefined if specifying a blackhole destination.
    *
-   * @see {@link TransitGatewayRouteTableVpcEntryConfig} {@link TransitGatewayRouteTableDxGatewayEntryConfig}
+   * @see {@link TransitGatewayRouteTableVpcEntryConfig} {@link TransitGatewayRouteTableDxGatewayEntryConfig} {@link TransitGatewayRouteTableVpnEntryConfig}
    */
   readonly attachment:
     | TransitGatewayRouteTableVpcEntryConfig
     | TransitGatewayRouteTableDxGatewayEntryConfig
+    | TransitGatewayRouteTableVpnEntryConfig
+    | TransitGatewayRouteTableTgwPeeringEntryConfig
     | undefined = undefined;
 }
 
 /**
+ * *{@link NetworkConfig} / {@link TransitGatewayConfig} / {@link TransitGatewayRouteTableConfig}*
+ *
  * Transit Gateway route table configuration.
  * Used to define a Transit Gateway route table.
+ *
+ * @example
+ * ```
+ * - name: Network-Main-Shared
+ *   routes: []
+ * ```
  */
 export class TransitGatewayRouteTableConfig
   implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteTableConfig>
@@ -907,8 +1124,173 @@ export class TransitGatewayRouteTableConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link TransitGatewayPeeringConfig} / {@link TransitGatewayPeeringRequesterConfig}*
+ *
+ * Transit Gateway peering requester configuration
+ *
+ * @example
+ * ```
+ * transitGatewayName: SharedServices-Main
+ * account: SharedServices
+ * region: us-west-2
+ * routeTableAssociations: SharedServices-Main-Core
+ * tags:
+ *   - key: Name
+ *     value: Network-Main-And-SharedServices-Main-Peering
+ * ```
+ */
+export class TransitGatewayPeeringRequesterConfig
+  implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayPeeringRequesterConfig>
+{
+  /**
+   * Accepter transit gateway name
+   */
+  readonly transitGatewayName = '';
+  /**
+   * Accepter transit gateway account name
+   */
+  readonly account = '';
+  /**
+   * Accepter transit gateway region name
+   */
+  readonly region: t.Region = 'us-east-1';
+  /**
+   * The friendly name of TGW route table to associate with this attachment.
+   */
+  readonly routeTableAssociations = '';
+  /**
+   * An array of tag objects for the Transit Gateway Peering.
+   */
+  readonly tags: t.Tag[] | undefined = undefined;
+}
+
+/**
+ * *{@link NetworkConfig} / {@link TransitGatewayPeeringConfig} / {@link TransitGatewayPeeringAccepterConfig}*
+ *
+ * Transit Gateway peering accepter configuration
+ *
+ * @example
+ * ```
+ * transitGatewayName: Network-Main
+ * account: Network
+ * region: us-east-1
+ * routeTableAssociations: Network-Main-Core
+ * autoAccept: true
+ * applyTags: false
+ * ```
+ */
+export class TransitGatewayPeeringAccepterConfig
+  implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayPeeringAccepterConfig>
+{
+  /**
+   * Accepter transit gateway name
+   */
+  readonly transitGatewayName = '';
+  /**
+   * Accepter transit gateway account name
+   */
+  readonly account = '';
+  /**
+   * Accepter transit gateway region name
+   */
+  readonly region: t.Region = 'us-east-1';
+  /**
+   * The friendly name of TGW route table to associate with this attachment.
+   */
+  readonly routeTableAssociations = '';
+  /**
+   * Peering request auto accept flag.
+   * When this flag is on, peering request will be accepted by LZA
+   */
+  readonly autoAccept = true;
+  /**
+   * Peering request apply tags flag.
+   * When this flag is on, requester attachment tags will be applied to peer or accepter attachment also.
+   * In peer or accepter attachment existing tags can't be changed, only given tags will be added or modified.
+   */
+  readonly applyTags = false;
+}
+
+/**
+ * *{@link NetworkConfig} / {@link TransitGatewayPeeringConfig}*
+ *
+ * Transit Gateway peering configuration
+ *
+ * To use TGW peering with requester TGW SharedServices-Main of SharedServices account in us-west-2 region with SharedServices-Main-Core TGW route table association
+ * and accepter TGW Network-Main of Network account in us-east-1 region with Network-Main-Core TGW route table association, please use following configuration.
+ * Please use following configuration. With autoAccept true LZA will make sure accepter account accepts the peering request.
+ * Flag applyTags set to false will not apply tags provided in requester of peering attachment to the accepter attachment
+ *
+ * Note: accepter property autoAccept and applyTags are optional. Default value for autoAccept is true and applyTags is false.
+ * @example
+ * ```
+ * transitGatewayPeering:
+ *  - name: Network-Main-And-SharedServices-Main-Peering
+ *    autoAccept: false
+ *    requester:
+ *      transitGatewayName: SharedServices-Main
+ *      account: SharedServices
+ *      region: us-west-2
+ *      routeTableAssociations: SharedServices-Main-Core
+ *      tags:
+ *        - key: Name
+ *          value: Network-Main-And-SharedServices-Main-Peering
+ *    accepter:
+ *      transitGatewayName: Network-Main
+ *      account: Network
+ *      region: us-east-1
+ *      routeTableAssociations: Network-Main-Core
+ *      autoAccept: true
+ *      applyTags: false
+ *
+ * ```
+ */
+export class TransitGatewayPeeringConfig implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayPeeringConfig> {
+  /**
+   * The friendly name of TGW peering.
+   */
+  readonly name = '';
+  /**
+   * Auto accept of transit gateway peering.
+   */
+  readonly autoAccept = true;
+  /**
+   * Peering attachment requester configuration.
+   *
+   * @see {@link TransitGatewayPeeringRequesterConfig}
+   */
+  readonly requester = new TransitGatewayPeeringRequesterConfig();
+  /**
+   * Peering attachment accepter configuration
+   *
+   * @see {@link TransitGatewayPeeringAccepterConfig}
+   */
+  readonly accepter = new TransitGatewayPeeringAccepterConfig();
+}
+
+/**
+ * *{@link NetworkConfig} / {@link TransitGatewayConfig}*
+ *
  * Transit Gateway configuration.
  * Used to define a Transit Gateway.
+ *
+ * @example
+ * ```
+ * transitGateways:
+ *   - name: Network-Main
+ *     account: Network
+ *     region: us-east-1
+ *     shareTargets:
+ *       organizationalUnits: []
+ *     asn: 65000
+ *     dnsSupport: enable
+ *     vpnEcmpSupport: enable
+ *     defaultRouteTableAssociation: disable
+ *     defaultRouteTablePropagation: disable
+ *     autoAcceptSharingAttachments: enable
+ *     routeTables: []
+ *     tags: []
+ * ```
  */
 export class TransitGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayConfig> {
   /**
@@ -991,6 +1373,8 @@ export class TransitGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.
 }
 
 /**
+ * *{@link NetworkConfig} / {@link DxGatewayConfig} / {@link DxVirtualInterfaceConfig}*
+ *
  * Direct Connect Gateway virtual interface configuration.
  * Use to create a virtual interface to a DX Gateway.
  *
@@ -1113,6 +1497,8 @@ export class DxVirtualInterfaceConfig implements t.TypeOf<typeof NetworkConfigTy
 }
 
 /**
+ * *{@link NetworkConfig} / {@link DxGatewayConfig} / {@link DxTransitGatewayAssociationConfig}*
+ *
  * Direct Connect Gateway transit gateway association configuration.
  * Use this object to define transit gateway attachments for a DX gateway.
  *
@@ -1162,18 +1548,21 @@ export class DxTransitGatewayAssociationConfig
   readonly routeTablePropagations: string[] | undefined = undefined;
 }
 /**
+ * *{@link NetworkConfig} / {@link DxGatewayConfig}*
+ *
  * Direct Connect Gateway configuration.
  * Used to define Direct Connect Gateways, virtual interfaces,
  * and gateway associations.
  *
  * @example
  * ```
- * - name: Accelerator-DXGW
- *   account: Network
- *   asn: 64512
- *   gamewayName: Accelerator-DXGW
- *   virtualInterfaces: []
- *   transitGatewayAssociations: []
+ * directConnectGateways:
+ *   - name: Accelerator-DXGW
+ *     account: Network
+ *     asn: 64512
+ *     gatewayName: Accelerator-DXGW
+ *     virtualInterfaces: []
+ *     transitGatewayAssociations: []
  * ```
  */
 export class DxGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.dxGatewayConfig> {
@@ -1226,8 +1615,17 @@ export class DxGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.dxGat
   readonly transitGatewayAssociations: DxTransitGatewayAssociationConfig[] | undefined = undefined;
 }
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link IpamConfig} / {@link IpamScopeConfig}*
+ *
  * IPAM scope configuration.
  * Used to define a custom IPAM scope.
+ *
+ * @example
+ * ```
+ * - name: accelerator-scope
+ *   description: Custom scope
+ *   tags: []
+ * ```
  */
 export class IpamScopeConfig implements t.TypeOf<typeof NetworkConfigTypes.ipamScopeConfig> {
   /**
@@ -1245,8 +1643,29 @@ export class IpamScopeConfig implements t.TypeOf<typeof NetworkConfigTypes.ipamS
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link IpamConfig} / {@link IpamPoolConfig}*
+ *
  * IPAM pool configuration.
  * Used to define an IPAM pool.
+ *
+ * @example
+ * Base pool:
+ * ```
+ * - name: accelerator-base-pool
+ *   description: Base IPAM pool
+ *   provisionedCidrs:
+ *     - 10.0.0.0/16
+ *   tags: []
+ * ```
+ * Regional pool:
+ * ```
+ * - name: accelerator-regional-pool
+ *   description: Regional pool for us-east-1
+ *   locale: us-east-1
+ *   provisionedCidrs:
+ *     - 10.0.0.0/24
+ *   sourceIpamPool: accelerator-base-pool
+ * ```
  */
 export class IpamPoolConfig implements t.TypeOf<typeof NetworkConfigTypes.ipamPoolConfig> {
   /**
@@ -1337,6 +1756,25 @@ export class IpamPoolConfig implements t.TypeOf<typeof NetworkConfigTypes.ipamPo
   readonly tags: t.Tag[] | undefined = undefined;
 }
 
+/**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link IpamConfig}*
+ *
+ * IPAM configuration. Used to define an AWS-managed VPC IPAM.
+ *
+ * @example
+ * ```
+ * ipams:
+ *   - name: accelerator-ipam
+ *     region: us-east-1
+ *     description: Accelerator IPAM
+ *     operatingRegions:
+ *       - us-east-1
+ *       - us-west-2
+ *     scopes: []
+ *     pools: []
+ *     tags: []
+ * ```
+ */
 export class IpamConfig implements t.TypeOf<typeof NetworkConfigTypes.ipamConfig> {
   /**
    * A friendly name for the IPAM.
@@ -1377,8 +1815,64 @@ export class IpamConfig implements t.TypeOf<typeof NetworkConfigTypes.ipamConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link RouteTableConfig} / {@link RouteTableEntryConfig}*
+ *
  * VPC route table entry configuration.
  * Used to define static route entries in a VPC route table.
+ *
+ * @example
+ * Transit Gateway Attachment
+ * ```
+ * - name: TgwRoute
+ *   destination: 0.0.0.0/0
+ *   type: transitGateway
+ *   target: Network-Main
+ * ```
+ *
+ * @example
+ * NAT Gateway
+ * ```
+ * - name: NatRoute
+ *   destination: 0.0.0.0/0
+ *   type: natGateway
+ *   target: Nat-A
+ * ```
+ *
+ * @example
+ * Internet Gateway
+ * ```
+ * - name: IgwRoute
+ *   destination: 0.0.0.0/0
+ *   type: internetGateway
+ * ```
+ *
+ * @example
+ * VPC Peering
+ * ```
+ * - name: PeerRoute
+ *   destination: 10.0.0.0/16
+ *   type: vpcPeering
+ *   target: Peering
+ * ```
+ *
+ * @example
+ * Network Firewall
+ * ```
+ * - name: NfwRoute
+ *   destination: 0.0.0.0/0
+ *   type: networkFirewall
+ *   target: accelerator-firewall
+ *   targetAvailabilityZone: a
+ * ```
+ *
+ * @example
+ * Gateway Load Balancer Endpoint
+ * ```
+ * - name: GwlbRoute
+ *   destination: 0.0.0.0/0
+ *   type: gatewayLoadBalancerEndpoint
+ *   target: Endpoint-A
+ * ```
  */
 export class RouteTableEntryConfig implements t.TypeOf<typeof NetworkConfigTypes.routeTableEntryConfig> {
   /**
@@ -1392,9 +1886,9 @@ export class RouteTableEntryConfig implements t.TypeOf<typeof NetworkConfigTypes
    * Use CIDR notation, i.e. 10.0.0.0/16
    *
    * Either `destination` or `destinationPrefixList` must be specified for the following route entry types:
-   * `transitGateway`, `natGateway`, `internetGateway`, `networkInterface`.
+   * `transitGateway`, `natGateway`, `internetGateway`, `networkInterface`, `vpcPeering`, `virtualPrivateGateway`.
    *
-   * `destination` MUST be specified for route entry type `networkFirewall`.
+   * `destination` MUST be specified for route entry type `networkFirewall` or `gatewayLoadBalancerEndpoint`.
    *
    * Leave undefined for route entry type `gatewayEndpoint`.
    */
@@ -1404,9 +1898,9 @@ export class RouteTableEntryConfig implements t.TypeOf<typeof NetworkConfigTypes
    *
    * @remarks
    * Either `destination` or `destinationPrefixList` must be specified for the following route entry types:
-   * `transitGateway`, `natGateway`, `internetGateway`, `networkInterface`.
+   * `transitGateway`, `natGateway`, `internetGateway`, `networkInterface`, `vpcPeering`, `virtualPrivateGateway`.
    *
-   * Cannot be specified for route entry type `networkFirewall`. Use `destination` instead.
+   * Cannot be specified for route entry type `networkFirewall` or `gatewayLoadBalancerEndpoint`. Use `destination` instead.
    *
    * Leave undefined for route entry type `gatewayEndpoint`.
    */
@@ -1423,7 +1917,7 @@ export class RouteTableEntryConfig implements t.TypeOf<typeof NetworkConfigTypes
    * @remarks
    * Use `s3` or `dynamodb` as the string when specifying a route entry type of `gatewayEndpoint`.
    *
-   * Leave undefined for route entry type `internetGateway`.
+   * Leave undefined for route entry type `internetGateway` or `virtualPrivateGateway`.
    */
   readonly target: string | undefined = undefined;
   /**
@@ -1438,6 +1932,8 @@ export class RouteTableEntryConfig implements t.TypeOf<typeof NetworkConfigTypes
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link RouteTableConfig}*
+ *
  * VPC route table configuration.
  * Used to define a VPC route table.
  *
@@ -1480,8 +1976,30 @@ export class RouteTableConfig implements t.TypeOf<typeof NetworkConfigTypes.rout
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link SubnetConfig}*
+ *
  * VPC subnet configuration.
  * Used to define a VPC subnet.
+ *
+ * @example
+ * Static CIDR:
+ * ```
+ * - name: accelerator-cidr-subnet-a
+ *   availabilityZone: a
+ *   routeTable: accelerator-cidr-subnet-a
+ *   ipv4CidrBlock: 10.0.0.0/26
+ *   tags: []
+ * ```
+ * IPAM allocation:
+ * ```
+ * - name: accelerator-ipam-subnet-a
+ *   availabilityZone: a
+ *   routeTable: accelerator-cidr-subnet-a
+ *   ipamAllocation:
+ *     ipamPoolName: accelerator-regional-pool
+ *     netmaskLength: 26
+ *   tags: []
+ * ```
  */
 export class SubnetConfig implements t.TypeOf<typeof NetworkConfigTypes.subnetConfig> {
   /**
@@ -1545,8 +2063,17 @@ export class SubnetConfig implements t.TypeOf<typeof NetworkConfigTypes.subnetCo
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link NatGatewayConfig}*
+ *
  * NAT Gateway configuration.
  * Used to define an AWS-managed NAT Gateway.
+ *
+ * @example
+ * ```
+ * - name: accelerator-nat-gw
+ *   subnet: accelerator-cidr-subnet-a
+ *   tags: []
+ * ```
  */
 export class NatGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.natGatewayConfig> {
   /**
@@ -1564,8 +2091,16 @@ export class NatGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.natG
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link TransitGatewayAttachmentConfig} / {@link TransitGatewayAttachmentTargetConfig}*
+ *
  * Transit Gateway attachment target configuration.
  * Used to define a target account for attachments.
+ *
+ * @example
+ * ```
+ * - name: Network-Main
+ *   account: Network
+ * ```
  */
 export class TransitGatewayAttachmentTargetConfig
   implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayAttachmentTargetConfig>
@@ -1581,8 +2116,17 @@ export class TransitGatewayAttachmentTargetConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link TransitGatewayAttachmentConfig} / {@link TransitGatewayAttachmentOptionsConfig}*
+ *
  * Transit Gateway attachment options configuration.
  * Used to specify advanced options for the attachment.
+ *
+ * @example
+ * ```
+ * applianceModeSupport: enable
+ * dnsSupport: enable
+ * ipv6Support disable
+ * ```
  */
 export class TransitGatewayAttachmentOptionsConfig
   implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayAttachmentOptionsConfig>
@@ -1605,8 +2149,16 @@ export class TransitGatewayAttachmentOptionsConfig
   readonly ipv6Support: t.EnableDisable | undefined = undefined;
 }
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} / {@link OutpostsConfig} / {@link LocalGatewayConfig} / {@link LocalGatewayRouteTableConfig}*
+ *
  * Local Gateway route table configuration.
  * Used to define a Local Gateway route table.
+ *
+ * @example
+ * ```
+ * - name: accelerator-local-gateway-rtb
+ *   id: lgw-rtb-abcxyz
+ * ```
  */
 export class LocalGatewayRouteTableConfig implements t.TypeOf<typeof NetworkConfigTypes.localGatewayRouteTableConfig> {
   /**
@@ -1619,8 +2171,16 @@ export class LocalGatewayRouteTableConfig implements t.TypeOf<typeof NetworkConf
   readonly id = '';
 }
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} / {@link OutpostsConfig} / {@link LocalGatewayConfig}*
+ *
  * Local Gateway configuration.
  * Used to define a Local Gateway
+ *
+ * @example
+ * ```
+ * name: accelerator-lgw
+ * id: lgw-abcxyz
+ * ```
  */
 export class LocalGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.localGatewayConfig> {
   /**
@@ -1638,8 +2198,21 @@ export class LocalGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.lo
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} / {@link OutpostsConfig}*
+ *
  * Outpost configuration.
  * Used to define an Outpost.
+ *
+ * @example
+ * ```
+ * - name: accelerator-outpost
+ *   arn: <outpost-resource-arn>
+ *   availabilityZone: a
+ *   localGateway:
+ *     name: accelerator-lgw
+ *     id: lgw-abcxyz
+ *     routeTables: []
+ * ```
  */
 export class OutpostsConfig implements t.TypeOf<typeof NetworkConfigTypes.outpostsConfig> {
   /**
@@ -1661,8 +2234,24 @@ export class OutpostsConfig implements t.TypeOf<typeof NetworkConfigTypes.outpos
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link TransitGatewayAttachmentConfig}*
+ *
  * Transit Gateway attachment configuration.
  * Used to define a Transit Gateway attachment.
+ *
+ * @example
+ * ```
+ * - name: Network-Inspection
+ *   transitGateway:
+ *     name: Network-Main
+ *     account: Network
+ *   subnets: []
+ *   routeTableAssociations: []
+ *   routeTablePropagations: []
+ *   options:
+ *     applianceModeSupport: enable
+ *   tags: []
+ * ```
  */
 export class TransitGatewayAttachmentConfig
   implements t.TypeOf<typeof NetworkConfigTypes.transitGatewayAttachmentConfig>
@@ -1702,8 +2291,16 @@ export class TransitGatewayAttachmentConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link GatewayEndpointConfig} / {@link GatewayEndpointServiceConfig}*
+ *
  * VPC gateway endpoint service configuration.
  * Used to define the service and policy for gateway endpoints.
+ *
+ * @example
+ * ```
+ * - service: s3
+ *   policy: Default
+ * ```
  */
 export class GatewayEndpointServiceConfig implements t.TypeOf<typeof NetworkConfigTypes.gatewayEndpointServiceConfig> {
   /**
@@ -1719,8 +2316,16 @@ export class GatewayEndpointServiceConfig implements t.TypeOf<typeof NetworkConf
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link GatewayEndpointConfig}*
+ *
  * VPC gateway endpoint configuration.
  * Used to define a gateway endpoints.
+ *
+ * @example
+ * ```
+ * defaultPolicy: Default
+ * endpoints []
+ * ```
  */
 export class GatewayEndpointConfig implements t.TypeOf<typeof NetworkConfigTypes.gatewayEndpointConfig> {
   /**
@@ -1734,8 +2339,16 @@ export class GatewayEndpointConfig implements t.TypeOf<typeof NetworkConfigTypes
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link InterfaceEndpointConfig} / {@link InterfaceEndpointServiceConfig}*
+ *
  * VPC interface endpoint service configuration.
  * Used to define the service and policy for interface endpoints.
+ *
+ * @example
+ * ```
+ * - service: ec2
+ *   policy: Default
+ * ```
  */
 export class InterfaceEndpointServiceConfig
   implements t.TypeOf<typeof NetworkConfigTypes.interfaceEndpointServiceConfig>
@@ -1755,8 +2368,17 @@ export class InterfaceEndpointServiceConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link InterfaceEndpointConfig}*
+ *
  * VPC interface endpoint configuration.
  * Used to define interface endpoints for a VPC.
+ *
+ * @example
+ * ```
+ * defaultPolicy: Default
+ * endpoints: []
+ * subnets: []
+ * ```
  */
 export class InterfaceEndpointConfig implements t.TypeOf<typeof NetworkConfigTypes.interfaceEndpointConfig> {
   /**
@@ -1792,8 +2414,17 @@ export class InterfaceEndpointConfig implements t.TypeOf<typeof NetworkConfigTyp
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link SecurityGroupConfig} / {@link SecurityGroupRuleConfig} / {@link SubnetSourceConfig}*
+ *
  * VPC subnet source configuration.
  * Used to define a subnet as a source in a security group rule.
+ *
+ * @example
+ * ```
+ * - account: Network
+ *   vpc: Network-Inspection
+ *   subnets: []
+ * ```
  */
 export class SubnetSourceConfig implements t.TypeOf<typeof NetworkConfigTypes.subnetSourceConfig> {
   /**
@@ -1811,8 +2442,16 @@ export class SubnetSourceConfig implements t.TypeOf<typeof NetworkConfigTypes.su
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link SecurityGroupConfig} / {@link SecurityGroupRuleConfig} / {@link SecurityGroupSourceConfig}*
+ *
  * Security group source configuration.
  * Used to define a security group as a source in a security group rule.
+ *
+ * @example
+ * ```
+ * - securityGroups:
+ *   - accelerator-sg
+ * ```
  */
 export class SecurityGroupSourceConfig implements t.TypeOf<typeof NetworkConfigTypes.securityGroupSourceConfig> {
   /**
@@ -1822,8 +2461,16 @@ export class SecurityGroupSourceConfig implements t.TypeOf<typeof NetworkConfigT
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link SecurityGroupConfig} / {@link SecurityGroupRuleConfig} / {@link PrefixListSourceConfig}*
+ *
  * Prefix list source configuration.
  * Used to define a prefix list as a source in a security group rule.
+ *
+ * @example
+ * ```
+ * - prefixLists:
+ *   - accelerator-pl
+ * ```
  */
 export class PrefixListSourceConfig implements t.TypeOf<typeof NetworkConfigTypes.prefixListSourceConfig> {
   /**
@@ -1833,8 +2480,25 @@ export class PrefixListSourceConfig implements t.TypeOf<typeof NetworkConfigType
 }
 
 /**
+ * *{@link NetworkConfig} / {@link PrefixListConfig}*
+ *
  * Prefix list configuration.
  * Used to define a custom prefix list.
+ *
+ * @example
+ * ```
+ * prefixLists:
+ *   - name: accelerator-pl
+ *     accounts:
+ *       - Network
+ *     regions:
+ *       - us-east-1
+ *     addressFamily: IPv4
+ *     maxEntries: 10
+ *     entries:
+ *       - 10.0.0.0/16
+ *     tags: []
+ * ```
  */
 export class PrefixListConfig implements t.TypeOf<typeof NetworkConfigTypes.prefixListConfig> {
   /**
@@ -1873,8 +2537,19 @@ export class PrefixListConfig implements t.TypeOf<typeof NetworkConfigTypes.pref
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link SecurityGroupConfig} / {@link SecurityGroupRuleConfig}*
+ *
  * Security group rule configuration.
  * Used to define a security group rule.
+ *
+ * @example
+ * ```
+ * - description: Remote access security group
+ *   types:
+ *     - RDP
+ *     - SSH
+ *   sources: []
+ * ```
  */
 export class SecurityGroupRuleConfig implements t.TypeOf<typeof NetworkConfigTypes.securityGroupRuleConfig> {
   /**
@@ -1920,8 +2595,29 @@ export class SecurityGroupRuleConfig implements t.TypeOf<typeof NetworkConfigTyp
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link SecurityGroupConfig}*
+ *
  * Security group configuration.
  * Used to define a security group.
+ *
+ * @example
+ * ```
+ * - name: accelerator-sg
+ *   description: Accelerator security group
+ *   inboundRules:
+ *     - description: Remote access security group rule
+ *       types:
+ *         - RDP
+ *         - SSH
+ *       sources:
+ *         - 10.0.0.0/16
+ *   outboundRules:
+ *     - description: Allow all outbound
+ *       types:
+ *         - ALL
+ *       sources:
+ *         - 0.0.0.0/0
+ * ```
  */
 export class SecurityGroupConfig implements t.TypeOf<typeof NetworkConfigTypes.securityGroupConfig> {
   /**
@@ -1951,8 +2647,17 @@ export class SecurityGroupConfig implements t.TypeOf<typeof NetworkConfigTypes.s
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link NetworkAclConfig} / {@link NetworkAclInboundRuleConfig} | {@link NetworkAclOutboundRuleConfig} / {@link NetworkAclSubnetSelection}*
+ *
  * Network ACL subnet selection configuration.
  * Used to specify a subnet as a source for a network ACL.
+ *
+ * @example
+ * ```
+ * account: Network
+ * vpc: Network-Inspection
+ * subnet: Network-Inspection-A
+ * ```
  */
 export class NetworkAclSubnetSelection implements t.TypeOf<typeof NetworkConfigTypes.networkAclSubnetSelection> {
   /**
@@ -1970,8 +2675,20 @@ export class NetworkAclSubnetSelection implements t.TypeOf<typeof NetworkConfigT
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link NetworkAclConfig} / {@link NetworkAclInboundRuleConfig}*
+ *
  * Network ACL inbound rule configuration.
  * Used to define an inbound rule for a network ACL.
+ *
+ * @example
+ * ```
+ * - rule: 200
+ *   protocol: -1
+ *   fromPort: 22
+ *   toPort: 22
+ *   action: allow
+ *   source: 10.0.0.0/16
+ * ```
  */
 export class NetworkAclInboundRuleConfig implements t.TypeOf<typeof NetworkConfigTypes.networkAclInboundRuleConfig> {
   /**
@@ -2009,8 +2726,20 @@ export class NetworkAclInboundRuleConfig implements t.TypeOf<typeof NetworkConfi
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link NetworkAclConfig} / {@link NetworkAclOutboundRuleConfig}*
+ *
  * Network ACL outbound rule configuration.
  * Used to define an outbound rule for a network ACL.
+ *
+ * @example
+ * ```
+ * - rule: 200
+ *   protocol: -1
+ *   fromPort: 1024
+ *   toPort: 65535
+ *   action: allow
+ *   destination: 10.0.0.0/16
+ * ```
  */
 export class NetworkAclOutboundRuleConfig implements t.TypeOf<typeof NetworkConfigTypes.networkAclOutboundRuleConfig> {
   /**
@@ -2048,8 +2777,32 @@ export class NetworkAclOutboundRuleConfig implements t.TypeOf<typeof NetworkConf
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / {@link NetworkAclConfig}*
+ *
  * Network ACL configuration.
  * Used to define the properties to configure a Network Access Control List (ACL)
+ *
+ * @example
+ * ```
+ * - name: accelerator-nacl
+ *   subnetAssociations:
+ *     - Subnet-A
+ *   inboundRules:
+ *     - rule: 200
+ *       protocol: -1
+ *       fromPort: 22
+ *       toPort: 22
+ *       action: allow
+ *       source: 10.0.0.0/16
+ *   outboundRules:
+ *     - rule: 200
+ *       protocol: -1
+ *       fromPort: 1024
+ *       toPort: 65535
+ *       action: allow
+ *       destination: 10.0.0.0/16
+ *   tags: []
+ * ```
  */
 export class NetworkAclConfig implements t.TypeOf<typeof NetworkConfigTypes.networkAclConfig> {
   /**
@@ -2084,6 +2837,23 @@ export class NetworkAclConfig implements t.TypeOf<typeof NetworkConfigTypes.netw
   readonly tags: t.Tag[] | undefined = undefined;
 }
 
+/**
+ * *{@link NetworkConfig} / {@link VpcConfig} | {@link VpcTemplatesConfig} / ({@link SubnetConfig}) / {@link IpamAllocationConfig}*
+ *
+ * IPAM allocation config. Use to dynamically assign a VPC or subnet CIDR from an IPAM pool.
+ *
+ * @example
+ * VPC allocations:
+ * ```
+ * - ipamPoolName: accelerator-regional-pool
+ *   netmaskLength: 24
+ * ```
+ * Subnet allocations:
+ * ```
+ * ipamPoolName: accelerator-regional-pool
+ * netmaskLength: 24
+ * ```
+ */
 export class IpamAllocationConfig implements t.TypeOf<typeof NetworkConfigTypes.ipamAllocationConfig> {
   /**
    * The IPAM Pool name to request the allocation from.
@@ -2100,8 +2870,24 @@ export class IpamAllocationConfig implements t.TypeOf<typeof NetworkConfigTypes.
 }
 
 /**
+ * *{@link NetworkConfig} / {@link DhcpOptsConfig}*
+ *
  * DHCP options configuration.
  * Used to define a custom DHCP options set.
+ *
+ * @example
+ * ```
+ * dhcpOptions:
+ *   - name: accelerator-dhcp-opts
+ *     accounts:
+ *       - Network
+ *     regions:
+ *       - us-east-1
+ *     domainName: example.com
+ *     domainNameServers
+ *       - 1.1.1.1
+ *     tags: []
+ * ```
  */
 export class DhcpOptsConfig implements t.TypeOf<typeof NetworkConfigTypes.dhcpOptsConfig> {
   /**
@@ -2147,8 +2933,17 @@ export class DhcpOptsConfig implements t.TypeOf<typeof NetworkConfigTypes.dhcpOp
 }
 
 /**
+ * *{@link NetworkConfig} / {@link EndpointPolicyConfig}*
+ *
  * VPC endpoint policy configuration.
  * Used to define VPC endpoint policies.
+ *
+ * @example
+ * ```
+ * endpointPolicies:
+ *   - name: Default
+ *     document: path/to/document.json
+ * ```
  */
 export class EndpointPolicyConfig implements t.TypeOf<typeof NetworkConfigTypes.endpointPolicyConfig> {
   /**
@@ -2162,8 +2957,277 @@ export class EndpointPolicyConfig implements t.TypeOf<typeof NetworkConfigTypes.
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CustomerGatewayConfig} / {@link VpnConnectionConfig} / {@link VpnTunnelOptionsSpecificationsConfig}*
+ *
+ * VPN tunnel options specification configuration.
+ * Used to define tunnel IP addresses and/or pre-shared keys
+ * for a site-to-site VPN connection
+ *
+ * @example
+ * ```
+ * - tunnelInsideCidr: 169.254.200.0/30
+ *   preSharedKey: Key1-AbcXyz
+ * - tunnelInsideCidr: 169.254.200.100/30
+ * ```
+ */
+export class VpnTunnelOptionsSpecificationsConfig
+  implements t.TypeOf<typeof NetworkConfigTypes.vpnTunnelOptionsSpecificationsConfig>
+{
+  /**
+   * The Secrets Manager name that stores the pre-shared key (PSK), that exists in the same account
+   * and region that the VPN Connection will be created in.
+   * @remarks
+   * Include the random hash that prepends the Secrets Manager name.
+   */
+  readonly preSharedKey: string | undefined = undefined;
+
+  /**
+   * The range of inside IP addresses for the tunnel. Any specified CIDR blocks must be unique across
+   * all VPN connections that use the same virtual private gateway.
+   * @remarks
+   * The following CIDR blocks are reserved
+   * and cannot be used: - 169.254.0.0/30 - 169.254.1.0/30 - 169.254.2.0/30 - 169.254.3.0/30 - 169.254.4.0/30
+   * - 169.254.5.0/30 - 169.254.169.252/30
+   */
+  readonly tunnelInsideCidr: string | undefined = undefined;
+}
+/**
+ * *{@link NetworkConfig} / {@link CustomerGatewayConfig} / {@link VpnConnectionConfig}*
+ *
+ * VPN Connection configuration.
+ * Used to define the VPN Connection and its termination point.
+ *
+ * @example
+ * ```
+ * - name: accelerator-vpn
+ *   transitGateway: Network-Main
+ *   routeTableAssociations:
+ *     - Network-Main-Core
+ *   routeTablePropagations:
+ *     - Network-Main-Core
+ *   staticRoutesOnly: false
+ *   tunnelSpecifications:
+ *     - tunnelInsideCidr: 169.254.200.0/30
+ *       preSharedKey: Key1-AbcXyz
+ *     - tunnelInsideCidr: 169.254.200.100/30
+ * ```
+ */
+export class VpnConnectionConfig implements t.TypeOf<typeof NetworkConfigTypes.vpnConnectionConfig> {
+  /**
+   * The name of the VPN Connection.
+   *
+   * The value of this property will be utilized as the logical id for this
+   * resource. Any references to this object should specify this value.
+   */
+  readonly name = '';
+
+  /**
+   * The logical name of the Transit Gateway that the customer Gateway is attached to
+   * so that a VPN connection is established.
+   * @remarks
+   * Must specify either the Transit Gateway name or the Virtual Private Gateway, not
+   * both.
+   */
+  readonly transitGateway: string | undefined = undefined;
+
+  /**
+   * The logical name of the Virtual Private Cloud that a Virtual Private Gateway is attached to.
+   * @remarks
+   * Must specify either the Transit Gateway name or the Virtual Private Gateway, not
+   * both.
+   */
+  readonly vpc: string | undefined = undefined;
+
+  /**
+   * (OPTIONAL) An array of Transit Gateway route table names to associate the VPN attachment to
+   *
+   * @remarks
+   * This is the `name` property of the Transit Gateway route table
+   *
+   * This property should only be defined if creating a VPN connection to a Transit Gateway.
+   * Leave undefined for VPN connections to virtual private gateways.
+   */
+  readonly routeTableAssociations: string[] | undefined = undefined;
+
+  /**
+   * (OPTIONAL) An array of Transit Gateway route table names to propagate the VPN attachment to
+   *
+   * @remarks
+   * This is the `name` property of the Transit Gateway route table
+   *
+   * This property should only be defined if creating a VPN connection to a Transit Gateway.
+   * Leave undefined for VPN connections to virtual private gateways.
+   */
+  readonly routeTablePropagations: string[] | undefined = undefined;
+
+  /**
+   * @remarks
+   * If creating a VPN connection for a device that doesn't support Border Gateway Protocol (BGP)
+   * declare true as a value, otherwise, use false.
+   */
+  readonly staticRoutesOnly: boolean | undefined = true;
+
+  /**
+   * An array of tags for the VPN Connection.
+   */
+  readonly tags: t.Tag[] | undefined = undefined;
+
+  /**
+   * Define the optional VPN Tunnel configuration
+   * @see {@link VpnTunnelOptionsSpecificationsConfig}
+   */
+  readonly tunnelSpecifications: VpnTunnelOptionsSpecificationsConfig[] = [];
+}
+
+/**
+ * *{@link NetworkConfig} / {@link CustomerGatewayConfig}*
+ *
+ * CGW Configuration
+ * Used to define Customer Gateways and site-to-site VPN connections.
+ *
+ * @example
+ * ```
+ * customerGateways:
+ *   - name: accelerator-cgw
+ *     account: Network
+ *     region: *HOME_REGION
+ *     ipAddress: 1.1.1.1
+ *     asn: 65500
+ *   vpnConnections:
+ *     - name: accelerator-vpn
+ *       transitGateway: Network-Main
+ *       routeTableAssociations:
+ *         - Network-Main-Core
+ *       routeTablePropagations:
+ *         - Network-Main-Core
+ *       staticRoutesOnly: false
+ *       tunnelSpecifications:
+ *         - tunnelInsideCidr: 169.254.200.0/30
+ *           preSharedKey: Key1-AbcXyz
+ *         - tunnelInsideCidr: 169.254.200.100/30
+ * ```
+ */
+export class CustomerGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.customerGatewayConfig> {
+  /**
+   * The name of the CGW.
+   *
+   * The value of this property will be utilized as the logical id for this
+   * resource. Any references to this object should specify this value.
+   */
+  readonly name = '';
+
+  /**
+   * The logical name of the account to deploy the VPC to
+   */
+  readonly account = '';
+
+  /**
+   * The AWS region to provision the customer gateway in
+   */
+  readonly region = 'us-east-1';
+
+  /**
+   * Defines the IP address of the Customer Gateway
+   */
+  readonly ipAddress: string = '';
+
+  /**
+   * Define the ASN used for the Customer Gateway
+   *
+   * @remarks
+   * The private ASN range is 64512 to 65534. The default is 65000.
+   */
+  readonly asn = 65000;
+
+  /**
+   * Define tags for the Customer Gateway
+   */
+  readonly tags: t.Tag[] | undefined = undefined;
+
+  /**
+   * Define the optional VPN Connection configuration
+   * @see {@link VpnConnectionConfig}
+   */
+  readonly vpnConnections: VpnConnectionConfig[] | undefined = undefined;
+}
+
+/**
+ * *{@link NetworkConfig} / {@link VpcConfig} / {@link LoadBalancersConfig}*
+ *
+ * Load Balancers Configuration
+ * Used to define ALB or NLBs to be deployed in the specified subnets
+ *
+ */
+
+export class LoadBalancersConfig implements t.TypeOf<typeof NetworkConfigTypes.loadBalancersConfig> {
+  readonly applicationLoadBalancers: CustomizationsConfig.ApplicationLoadBalancerConfig[] | undefined = undefined;
+  readonly networkLoadBalancers: CustomizationsConfig.NetworkLoadBalancerConfig[] | undefined = undefined;
+}
+
+/**
+ * *{@link NetworkConfig} / {@link VpcConfig} / {@link VirtualPrivateGatewayConfig}*
+ *
+ * Virtual Private Gateway Configuration
+ * Used to define Virtual Private Gateways that are attached to a VPC.
+ *
+ * @example
+ * ```
+ * virtualPrivateGateway:
+ *  asn: 65500
+ * ```
+ */
+export class VirtualPrivateGatewayConfig implements t.TypeOf<typeof NetworkConfigTypes.virtualPrivateGatewayConfig> {
+  /**
+   * Define the ASN (Amazon Side) used for the Virtual Private Gateway
+   *
+   * @remarks
+   * The private ASN range is 64512 to 65534. The default is 65000.
+   */
+  readonly asn = 65000;
+}
+
+/**
+ * *{@link NetworkConfig} / {@link VpcConfig}*
+ *
  * VPC configuration.
  * Used to define a VPC.
+ *
+ * @example
+ * Static CIDR:
+ * ```
+ * vpcs:
+ *   - name: Network-Inspection
+ *     account: Network
+ *     region: us-east-1
+ *     cidrs:
+ *       - 10.0.0.0/24
+ *     enableDnsHostnames: true
+ *     enableDnsSupport: true
+ *     instanceTenancy: default
+ *     routeTables: []
+ *     subnets: []
+ *     natGateways: []
+ *     transitGatewayAttachments: []
+ *     tags: []
+ * ```
+ * IPAM allocation:
+ * ```
+ * vpcs:
+ *   - name: Network-Inspection
+ *     account: Network
+ *     region: us-east-1
+ *     ipamAllocations:
+ *       - ipamPoolName: accelerator-regional-pool
+ *         netmaskLength: 24
+ *     enableDnsHostnames: true
+ *     enableDnsSupport: true
+ *     instanceTenancy: default
+ *     routeTables: []
+ *     subnets: []
+ *     natGateways: []
+ *     transitGatewayAttachments: []
+ *     tags: []
+ * ```
  */
 export class VpcConfig implements t.TypeOf<typeof NetworkConfigTypes.vpcConfig> {
   /**
@@ -2189,7 +3253,7 @@ export class VpcConfig implements t.TypeOf<typeof NetworkConfigTypes.vpcConfig> 
    *
    * @remarks
    * At least one CIDR should be
-   * provided if not using `ipamAllocation`.
+   * provided if not using `ipamAllocations`.
    *
    * Use CIDR notation, i.e. 10.0.0.0/16
    */
@@ -2312,14 +3376,65 @@ export class VpcConfig implements t.TypeOf<typeof NetworkConfigTypes.vpcConfig> 
   readonly tags: t.Tag[] | undefined = undefined;
 
   /**
+   * Virtual Private Gateway configuration
+   *
+   * @default undefined
+   */
+  readonly virtualPrivateGateway: VirtualPrivateGatewayConfig | undefined = undefined;
+
+  /**
    * VPC flog log configuration
    */
   readonly vpcFlowLogs: t.VpcFlowLogsConfig | undefined = undefined;
+  readonly loadBalancers: LoadBalancersConfig | undefined = undefined;
+  readonly targetGroups: CustomizationsConfig.TargetGroupItemConfig[] | undefined = undefined;
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcTemplatesConfig}*
+ *
  * VPC templates configuration.
  * Used to define a VPC that is deployed to multiple accounts/OUs.
+ *
+ * Static CIDR:
+ * ```
+ * vpcTemplates:
+ *   - name: Accelerator-Template
+ *     deploymentTargets:
+ *       organizationalUnits:
+ *         - Infrastructure
+ *     region: us-east-1
+ *     cidrs:
+ *       - 10.0.0.0/24
+ *     enableDnsHostnames: true
+ *     enableDnsSupport: true
+ *     instanceTenancy: default
+ *     routeTables: []
+ *     subnets: []
+ *     natGateways: []
+ *     transitGatewayAttachments: []
+ *     tags: []
+ * ```
+ * IPAM allocation:
+ * ```
+ * vpcTemplates:
+ *   - name: Accelerator-Template
+ *     deploymentTargets:
+ *       organizationalUnits:
+ *         - Infrastructure
+ *     region: us-east-1
+ *     ipamAllocations:
+ *       - ipamPoolName: accelerator-regional-pool
+ *         netmaskLength: 24
+ *     enableDnsHostnames: true
+ *     enableDnsSupport: true
+ *     instanceTenancy: default
+ *     routeTables: []
+ *     subnets: []
+ *     natGateways: []
+ *     transitGatewayAttachments: []
+ *     tags: []
+ * ```
  */
 export class VpcTemplatesConfig implements t.TypeOf<typeof NetworkConfigTypes.vpcTemplatesConfig> {
   /**
@@ -2346,11 +3461,22 @@ export class VpcTemplatesConfig implements t.TypeOf<typeof NetworkConfigTypes.vp
   readonly deploymentTargets: t.DeploymentTargets = new t.DeploymentTargets();
 
   /**
+   * A list of CIDRs to associate with the VPC.
+   *
+   * @remarks
+   * At least one CIDR should be
+   * provided if not using `ipamAllocations`.
+   *
+   * Use CIDR notation, i.e. 10.0.0.0/16
+   */
+  readonly cidrs: string[] | undefined = undefined;
+
+  /**
    * An array of IPAM allocation configurations.
    *
    * @see {@link IpamAllocationConfig}
    */
-  readonly ipamAllocations: IpamAllocationConfig[] = [];
+  readonly ipamAllocations: IpamAllocationConfig[] | undefined = undefined;
 
   /**
    * The friendly name of a DHCP options set.
@@ -2459,14 +3585,40 @@ export class VpcTemplatesConfig implements t.TypeOf<typeof NetworkConfigTypes.vp
   readonly tags: t.Tag[] | undefined = undefined;
 
   /**
+   * Virtual Private Gateway configuration
+   *
+   * @default undefined
+   */
+  readonly virtualPrivateGateway: VirtualPrivateGatewayConfig | undefined = undefined;
+
+  /**
    * VPC flog log configuration
    */
   readonly vpcFlowLogs: t.VpcFlowLogsConfig | undefined = undefined;
+
+  readonly loadBalancers: LoadBalancersConfig | undefined = undefined;
+
+  readonly targetGroups: CustomizationsConfig.TargetGroupItemConfig[] | undefined = undefined;
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link ResolverConfig} / ({@link ResolverEndpointConfig}) / {@link ResolverRuleConfig}*
+ *
  * Route 53 resolver rule configuration.
  * Used to define resolver rules.
+ *
+ * @example
+ * ```
+ * - name: accelerator-rule
+ *   domainName: example.com
+ *   ruleType: FORWARD
+ *   shareTargets:
+ *     organizationalUnits:
+ *       - Root
+ *   targetIps:
+ *     - ip: 1.1.1.1
+ *   tags: []
+ * ```
  */
 export class ResolverRuleConfig implements t.TypeOf<typeof NetworkConfigTypes.resolverRuleConfig> {
   /**
@@ -2521,8 +3673,37 @@ export class ResolverRuleConfig implements t.TypeOf<typeof NetworkConfigTypes.re
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link ResolverConfig} / {@link ResolverEndpointConfig}*
+ *
  * Route 53 resolver endpoint configuration.
  * Used to define a resolver endpoint.
+ *
+ * @example
+ * Outbound endpoint:
+ * ```
+ * - name: accelerator-outbound
+ *   type: OUTBOUND
+ *   vpc: Network-Endpoints
+ *   allowedCidrs:
+ *     - 10.0.0.0/16
+ *   subnets:
+ *     - Subnet-A
+ *     - Subnet-B
+ *   rules: []
+ *   tags: []
+ * ```
+ * Inbound Endpoint:
+ * ```
+ * - name: accelerator-inbound
+ *   type: INBOUND
+ *   vpc: Network-Endpoints
+ *   allowedCidrs:
+ *     - 10.0.0.0/16
+ *   subnets:
+ *     - Subnet-A
+ *     - Subnet-B
+ *   tags: []
+ * ```
  */
 export class ResolverEndpointConfig implements t.TypeOf<typeof NetworkConfigTypes.resolverEndpointConfig> {
   /**
@@ -2560,8 +3741,21 @@ export class ResolverEndpointConfig implements t.TypeOf<typeof NetworkConfigType
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link ResolverConfig} / {@link DnsQueryLogsConfig}*
+ *
  * Route 53 DNS query logging configuration.
  * Use to define query logging configs.
+ *
+ * @example
+ * ```
+ * name: accelerator-query-logs
+ * destinations:
+ *   - s3
+ *   - cloud-watch-logs
+ * shareTargets:
+ *   organizationalUnits:
+ *     - Root
+ * ```
  */
 export class DnsQueryLogsConfig implements t.TypeOf<typeof NetworkConfigTypes.dnsQueryLogsConfig> {
   /**
@@ -2586,8 +3780,19 @@ export class DnsQueryLogsConfig implements t.TypeOf<typeof NetworkConfigTypes.dn
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link ResolverConfig} / {@link DnsFirewallRuleGroupConfig} / {@link DnsFirewallRulesConfig}*
+ *
  * Route 53 DNS firewall rule configuration.
  * Used to define DNS firewall rules.
+ *
+ * @example
+ * ```
+ * - name: accelerator-dns-rule
+ *   action: BLOCK
+ *   priority: 100
+ *   blockResponse: NXDOMAIN
+ *   customDomainList: path/to/domains.txt
+ * ```
  */
 export class DnsFirewallRulesConfig implements t.TypeOf<typeof NetworkConfigTypes.dnsFirewallRulesConfig> {
   /**
@@ -2635,8 +3840,27 @@ export class DnsFirewallRulesConfig implements t.TypeOf<typeof NetworkConfigType
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link ResolverConfig} / {@link DnsFirewallRuleGroupConfig}*
+ *
  * Route 53 DNS firewall rule group configuration.
  * Used to define a DNS firewall rule group.
+ *
+ * @example
+ * ```
+ * - name: accelerator-rule-group
+ *   regions:
+ *     - us-east-1
+ *   rules:
+ *     - name: accelerator-dns-rule
+ *       action: BLOCK
+ *       priority: 100
+ *       blockResponse: NXDOMAIN
+ *       customDomainList: path/to/domains.txt
+ *   shareTargets:
+ *     organizationalUnits:
+ *       - Root
+ *   tags: []
+ * ```
  */
 export class DnsFirewallRuleGroupConfig implements t.TypeOf<typeof NetworkConfigTypes.dnsFirewallRuleGroupConfig> {
   /**
@@ -2671,8 +3895,48 @@ export class DnsFirewallRuleGroupConfig implements t.TypeOf<typeof NetworkConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link ResolverConfig}*
+ *
  * Route 53 resolver configuration.
  * Used to define configurations for Route 53 resolver.
+ *
+ * @example
+ * ```
+ * route53Resolver:
+ *   endpoints:
+ *     - name: accelerator-outbound
+ *       type: OUTBOUND
+ *       vpc: Network-Endpoints
+ *       allowedCidrs:
+ *         - 10.0.0.0/16
+ *       subnets:
+ *         - Subnet-A
+ *         - Subnet-B
+ *       rules: []
+ *       tags: []
+ *   firewallRuleGroups:
+ *     - name: accelerator-rule-group
+ *       regions:
+ *         - us-east-1
+ *       rules:
+ *         - name: accelerator-dns-rule
+ *           action: BLOCK
+ *           priority: 100
+ *           blockResponse: NXDOMAIN
+ *           customDomainList: path/to/domains.txt
+ *       shareTargets:
+ *         organizationalUnits:
+ *           - Root
+ *       tags: []
+ *   queryLogs:
+ *     name: accelerator-query-logs
+ *     destinations:
+ *       - s3
+ *       - cloud-watch-logs
+ *     shareTargets:
+ *       organizationalUnits:
+ *         - Root
+ * ```
  */
 export class ResolverConfig implements t.TypeOf<typeof NetworkConfigTypes.resolverConfig> {
   /**
@@ -2704,10 +3968,20 @@ export class ResolverConfig implements t.TypeOf<typeof NetworkConfigTypes.resolv
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwRuleSourceListConfig}*
+ *
  * Network Firewall rule source list configuration.
  * Used to define DNS allow and deny lists for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-rulessourcelist.html}
+ *
+ * @example
+ * ```
+ * generatedRulesType: DENYLIST
+ * targets:
+ *   - .example.com
+ * targetTypes: ['TLS_SNI', 'HTTP_HOST']
+ * ```
  */
 export class NfwRuleSourceListConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceListConfig> {
   /**
@@ -2734,10 +4008,22 @@ export class NfwRuleSourceListConfig implements t.TypeOf<typeof NetworkConfigTyp
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwRuleSourceStatefulRuleConfig} / {@link NfwRuleSourceStatefulRuleHeaderConfig}*
+ *
  * Network Firewall stateful rule header configuration.
  * Used to specify a stateful rule in a header-type format.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-header.html}
+ *
+ * @example
+ * ```
+ * source: 10.1.0.0/16
+ * sourcePort: ANY
+ * destination: 10.0.0.0/16
+ * destinationPort: ANY
+ * direction: FORWARD
+ * protocol: IP
+ * ```
  */
 export class NfwRuleSourceStatefulRuleHeaderConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceStatefulRuleHeaderConfig>
@@ -2795,10 +4081,18 @@ export class NfwRuleSourceStatefulRuleHeaderConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwRuleSourceStatefulRuleConfig} / {@link NfwRuleSourceStatefulRuleOptionsConfig}*
+ *
  * Network Firewall stateful rule options configuration.
  * Use to specify keywords and settings for stateful rules.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-ruleoption.html}
+ *
+ * @example
+ * ```
+ * - keyword: sid
+ *   settings: ['100']
+ * ```
  */
 export class NfwRuleSourceStatefulRuleOptionsConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceStatefulRuleOptionsConfig>
@@ -2814,10 +4108,27 @@ export class NfwRuleSourceStatefulRuleOptionsConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwRuleSourceStatefulRuleConfig}*
+ *
  * Network Firewall stateful rule configuration.
  * Use to define stateful rules for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-statefulrule.html}
+ *
+ * @example
+ * ```
+ * - action: PASS
+ *   header:
+ *     source: 10.1.0.0/16
+ *     sourcePort: ANY
+ *     destination: 10.0.0.0/16
+ *     destinationPort: ANY
+ *     direction: FORWARD
+ *     protocol: IP
+ *   ruleOptions:
+ *     - keyword: sid
+ *       settings: ['100']
+ * ```
  */
 export class NfwRuleSourceStatefulRuleConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceStatefulRuleConfig>
@@ -2843,10 +4154,18 @@ export class NfwRuleSourceStatefulRuleConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig} / {@link NfwRuleSourceCustomActionConfig} / {@link NfwRuleSourceCustomActionDefinitionConfig} / {@link NfwRuleSourceCustomActionDimensionConfig}*
+ *
  * Network Firewall custom actions dimensions.
  * Used to define custom actions to log in CloudWatch metrics.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-dimension.html}
+ *
+ * @example
+ * ```
+ * dimensions:
+ *   - CustomValue
+ * ```
  */
 export class NfwRuleSourceCustomActionDimensionConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceCustomActionDimensionConfig>
@@ -2858,10 +4177,19 @@ export class NfwRuleSourceCustomActionDimensionConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig} / {@link NfwRuleSourceCustomActionConfig} / {@link NfwRuleSourceCustomActionDefinitionConfig}*
+ *
  * Network Firewall custom action definition configuration.
  * Used to define custom metrics for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-actiondefinition.html}
+ *
+ * @example
+ * ```
+ * publishMetricAction:
+ *   dimensions:
+ *     - CustomValue
+ * ```
  */
 export class NfwRuleSourceCustomActionDefinitionConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceCustomActionDefinitionConfig>
@@ -2876,10 +4204,21 @@ export class NfwRuleSourceCustomActionDefinitionConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig} / {@link NfwRuleSourceCustomActionConfig}*
+ *
  * Network Firewall custom action configuration.
  * Used to define custom actions for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-customaction.html}
+ *
+ * @example
+ * ```
+ * actionDefinition:
+ *   publishMetricAction:
+ *     dimensions:
+ *       - CustomValue
+ * actionName: CustomAction
+ * ```
  */
 export class NfwRuleSourceCustomActionConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceCustomActionConfig>
@@ -2898,10 +4237,18 @@ export class NfwRuleSourceCustomActionConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig} / {@link NfwRuleSourceStatelessRuleConfig} / {@link NfwRuleSourceStatelessRuleDefinitionConfig} / {@link NfwRuleSourceStatelessMatchAttributesConfig} / {@link NfwRuleSourceStatelessPortRangeConfig}*
+ *
  * Network Firewall stateless port range configuration.
  * Used to define a port range in stateless rules.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-portrange.html}
+ *
+ * @example
+ * ```
+ * - fromPort: 22
+ *   toPort: 22
+ * ```
  */
 export class NfwRuleSourceStatelessPortRangeConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceStatelessPortRangeConfig>
@@ -2917,10 +4264,18 @@ export class NfwRuleSourceStatelessPortRangeConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig} / {@link NfwRuleSourceStatelessRuleConfig} / {@link NfwRuleSourceStatelessRuleDefinitionConfig} / {@link NfwRuleSourceStatelessMatchAttributesConfig} / {@link NfwRuleSourceStatelessTcpFlagsConfig}*
+ *
  * Network Firewall stateless TCP flags configuration.
  * Used to define TCP flags to inspect in stateless rules.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-tcpflagfield.html}
+ *
+ * @example
+ * ```
+ * - flags: ['SYN', 'ECE']
+ *   masks: []
+ * ```
  */
 export class NfwRuleSourceStatelessTcpFlagsConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceStatelessTcpFlagsConfig>
@@ -2948,10 +4303,26 @@ export class NfwRuleSourceStatelessTcpFlagsConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig} / {@link NfwRuleSourceStatelessRuleConfig} / {@link NfwRuleSourceStatelessRuleDefinitionConfig} / {@link NfwRuleSourceStatelessMatchAttributesConfig}*
+ *
  * Network Firewall stateless rule match attributes configuration.
  * Used to define stateless rule match attributes for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-matchattributes.html}
+ *
+ * @example
+ * ```
+ * sources:
+ *   - 10.1.0.0/16
+ * sourcePorts:
+ *   - fromPort: 1024
+ *     toPort: 65535
+ * destinations:
+ *   - 10.0.0.0/16
+ * destinationPorts:
+ *   - fromPort: 22
+ *     toPort: 22
+ * ```
  */
 export class NfwRuleSourceStatelessMatchAttributesConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceStatelessMatchAttributesConfig>
@@ -2995,10 +4366,28 @@ export class NfwRuleSourceStatelessMatchAttributesConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig} / {@link NfwRuleSourceStatelessRuleConfig} / {@link NfwRuleSourceStatelessRuleDefinitionConfig}*
+ *
  * Network Firewall stateless rule definition configuration.
  * Used to define a stateless rule definition.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-ruledefinition.html}
+ *
+ * @example
+ * ```
+ * actions: ['aws:pass']
+ * matchAttributes:
+ *   sources:
+ *     - 10.1.0.0/16
+ *   sourcePorts:
+ *     - fromPort: 1024
+ *       toPort: 65535
+ *   destinations:
+ *     - 10.0.0.0/16
+ *   destinationPorts:
+ *     - fromPort: 22
+ *       toPort: 22
+ * ```
  */
 export class NfwRuleSourceStatelessRuleDefinitionConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceStatelessRuleDefinitionConfig>
@@ -3019,10 +4408,30 @@ export class NfwRuleSourceStatelessRuleDefinitionConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig} / {@link NfwRuleSourceStatelessRuleConfig}*
+ *
  * Network Firewall stateless rule configuration.
  * Used to define a stateless rule for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-statelessrule.html}
+ *
+ * @example
+ * ```
+ * - priority: 100
+ *   ruleDefinition:
+ *     actions: ['aws:pass']
+ *     matchAttributes:
+ *       sources:
+ *         - 10.1.0.0/16
+ *       sourcePorts:
+ *         - fromPort: 1024
+ *           toPort: 65535
+ *       destinations:
+ *         - 10.0.0.0/16
+ *       destinationPorts:
+ *         - fromPort: 22
+ *           toPort: 22
+ * ```
  */
 export class NfwRuleSourceStatelessRuleConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceStatelessRuleConfig>
@@ -3044,10 +4453,37 @@ export class NfwRuleSourceStatelessRuleConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig} / {@link NfwStatelessRulesAndCustomActionsConfig}*
+ *
  * Network Firewall stateless rules and custom metrics configuration.
  * Used to define stateless rules and/or custom metrics for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-statelessrulesandcustomactions.html}
+ *
+ * @example
+ * ```
+ * statelessRules:
+ *   - priority: 100
+ *     ruleDefinition:
+ *       actions: ['aws:pass']
+ *       matchAttributes:
+ *         sources:
+ *           - 10.1.0.0/16
+ *         sourcePorts:
+ *           - fromPort: 1024
+ *             toPort: 65535
+ *         destinations:
+ *           - 10.0.0.0/16
+ *         destinationPorts:
+ *           - fromPort: 22
+ *             toPort: 22
+ * customActions:
+ *   actionDefinition:
+ *     publishMetricAction:
+ *       dimensions:
+ *         - CustomValue
+ *   actionName: CustomAction
+ * ```
  */
 export class NfwStatelessRulesAndCustomActionsConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwStatelessRulesAndCustomActionsConfig>
@@ -3067,10 +4503,64 @@ export class NfwStatelessRulesAndCustomActionsConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleSourceConfig}*
+ *
  * Network Firewall rule source configuration.
  * Used to define rules for a Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-rulessource.html}
+ *
+ * @example
+ * File with list of Suricata rules:
+ * ```
+ * rulesFile: path/to/rules.txt
+ * ```
+ * DNS rule list:
+ * ```
+ * rulesSourceList:
+ *   generatedRulesType: DENYLIST
+ *   targets:
+ *     - .example.com
+ *   targetTypes: ['TLS_SNI', 'HTTP_HOST']
+ * ```
+ * Single Suricata rule:
+ * ```
+ * rulesString: 'pass ip 10.1.0.0/16 any -> 10.0.0.0/16 any (sid:100;)'
+ * ```
+ * Stateful rules:
+ * ```
+ * statefulRules:
+ *   - action: PASS
+ *     header:
+ *       source: 10.1.0.0/16
+ *       sourcePort: ANY
+ *       destination: 10.0.0.0/16
+ *       destinationPort: ANY
+ *       direction: FORWARD
+ *       protocol: IP
+ *     ruleOptions:
+ *       - keyword: sid
+ *         settings: ['100']
+ * ```
+ * Stateless rules:
+ * ```
+ * statelessRulesAndCustomActions:
+ *   statelessRules:
+ *     - priority: 100
+ *       ruleDefinition:
+ *         actions: ['aws:pass']
+ *         matchAttributes:
+ *           sources:
+ *             - 10.1.0.0/16
+ *           sourcePorts:
+ *             - fromPort: 1024
+ *               toPort: 65535
+ *           destinations:
+ *             - 10.0.0.0/16
+ *           destinationPorts:
+ *             - fromPort: 22
+ *               toPort: 22
+ * ```
  */
 export class NfwRuleSourceConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleSourceConfig> {
   /**
@@ -3097,13 +4587,28 @@ export class NfwRuleSourceConfig implements t.TypeOf<typeof NetworkConfigTypes.n
    * @see {@link NfwStatelessRulesAndCustomActionsConfig}
    */
   readonly statelessRulesAndCustomActions: NfwStatelessRulesAndCustomActionsConfig | undefined = undefined;
+  /**
+   * Suricata rules file.
+   *
+   * @see {@link https://suricata.readthedocs.io/en/suricata-6.0.2/rules/intro.html}
+   *
+   */
+  readonly rulesFile: string | undefined = undefined;
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleVariableConfig} / {@link NfwRuleVariableDefinitionConfig}*
+ *
  * Network Firewall rule variable definition configuration.
  * Used to define a rule variable definition for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-rulevariables.html}
+ *
+ * @example
+ * ```
+ * name: HOME_NET
+ * definition: ['10.0.0.0/16']
+ * ```
  */
 export class NfwRuleVariableDefinitionConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleVariableDefinitionConfig>
@@ -3119,10 +4624,22 @@ export class NfwRuleVariableDefinitionConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig} / {@link NfwRuleVariableConfig}*
+ *
  * Network Firewall rule variable configuration.
  * Used to define a rule variable for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-rulevariables.html}
+ *
+ * @example
+ * ```
+ * ipSets:
+ *   name: HOME_NET
+ *   definition: ['10.0.0.0/16']
+ * portSets:
+ *   name: HOME_NET
+ *   definition: ['80', '443']
+ * ```
  */
 export class NfwRuleVariableConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleVariableConfig> {
   /**
@@ -3140,10 +4657,25 @@ export class NfwRuleVariableConfig implements t.TypeOf<typeof NetworkConfigTypes
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig} / {@link NfwRuleGroupRuleConfig}*
+ *
  * Network Firewall rule group rule configuration.
  * Used to define rules for a Network Firewall rule group.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-rulegroup-rulegroup.html}
+ *
+ * @example
+ * ```
+ * rulesSource:
+ *   rulesFile: path/to/rules.txt
+ * ruleVariables:
+ *   ipSets:
+ *     name: HOME_NET
+ *     definition: ['10.0.0.0/16']
+ *   portSets:
+ *     name: HOME_NET
+ *     definition: ['80', '443']
+ * ```
  */
 export class NfwRuleGroupRuleConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleGroupRuleConfig> {
   /**
@@ -3167,10 +4699,59 @@ export class NfwRuleGroupRuleConfig implements t.TypeOf<typeof NetworkConfigType
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwRuleGroupConfig}*
+ *
  * Network Firewall rule group configuration.
  * Used to define a rule group for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-networkfirewall-rulegroup.html}
+ *
+ * @example
+ * Stateful rule group:
+ * ```
+ * - name: accelerator-stateful-group
+ *   regions:
+ *     - us-east-1
+ *   capacity: 100
+ *   type: STATEFUL
+ *   ruleGroup:
+ *     rulesSource:
+ *       rulesFile: path/to/rules.txt
+ *   shareTargets:
+ *     organizationalUnits:
+ *       - Root
+ *   tags: []
+ * ```
+ * Stateless rule group:
+ * ```
+ * - name: accelerator-stateless-group
+ *   regions:
+ *     - us-east-1
+ *   capacity: 100
+ *   type: STATELESS
+ *   ruleGroup:
+ *     rulesSource:
+ *       statelessRulesAndCustomActions:
+ *         statelessRules:
+ *           - priority: 100
+ *             ruleDefinition:
+ *               actions: ['aws:pass']
+ *               matchAttributes:
+ *                 sources:
+ *                   - 10.1.0.0/16
+ *                 sourcePorts:
+ *                   - fromPort: 1024
+ *                     toPort: 65535
+ *                 destinations:
+ *                   - 10.0.0.0/16
+ *                 destinationPorts:
+ *                   - fromPort: 22
+ *                     toPort: 22
+ *   shareTargets:
+ *     organizationalUnits:
+ *       - Root
+ *   tags: []
+ * ```
  */
 export class NfwRuleGroupConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwRuleGroupConfig> {
   /**
@@ -3219,10 +4800,17 @@ export class NfwRuleGroupConfig implements t.TypeOf<typeof NetworkConfigTypes.nf
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwFirewallPolicyConfig} / {@link NfwFirewallPolicyPolicyConfig} / {@link NfwStatefulRuleGroupReferenceConfig}*
+ *
  * Network Firewall stateful rule group reference configuration.
  * Used to reference a stateful rule group in a Network Firewall policy.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-firewallpolicy-statefulrulegroupreference.html}
+ *
+ * @example
+ * ```
+ * - name: accelerator-stateful-group
+ * ```
  */
 export class NfwStatefulRuleGroupReferenceConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwStatefulRuleGroupReferenceConfig>
@@ -3238,10 +4826,18 @@ export class NfwStatefulRuleGroupReferenceConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwFirewallPolicyConfig} / {@link NfwFirewallPolicyPolicyConfig} / {@link NfwStatelessRuleGroupReferenceConfig}*
+ *
  * Network Firewall stateless rule group configuration.
  * Used to reference a stateless rule group in a Network Firewall policy.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-firewallpolicy-statelessrulegroupreference.html}
+ *
+ * @example
+ * ```
+ * - name: accelerator-stateless-group
+ *   priority: 100
+ * ```
  */
 export class NfwStatelessRuleGroupReferenceConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwStatelessRuleGroupReferenceConfig>
@@ -3257,10 +4853,23 @@ export class NfwStatelessRuleGroupReferenceConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwFirewallPolicyConfig} / {@link NfwFirewallPolicyPolicyConfig}*
+ *
  * Network Firewall policy policy configuration.
  * Used to define the configuration of a Network Firewall policy.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-firewallpolicy-firewallpolicy.html}
+ *
+ * @example:
+ * ```
+ * statelessDefaultActions: ['aws:forward_to_sfe']
+ * statelessFragmentDefaultActions: ['aws:forward_to_sfe']
+ * statefulRuleGroups:
+ *   - name: accelerator-stateful-group
+ * statelessRuleGroups:
+ *   - name: accelerator-stateless-group
+ *     priority: 100
+ * ```
  */
 export class NfwFirewallPolicyPolicyConfig
   implements t.TypeOf<typeof NetworkConfigTypes.nfwFirewallPolicyPolicyConfig>
@@ -3305,10 +4914,31 @@ export class NfwFirewallPolicyPolicyConfig
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwFirewallPolicyConfig}*
+ *
  * Network Firewall policy configuration.
  * Used to define a Network Firewall policy.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-networkfirewall-firewallpolicy.html}
+ *
+ * @example
+ * ```
+ * - name: accelerator-nfw-policy
+ *   firewallPolicy:
+ *     statelessDefaultActions: ['aws:forward_to_sfe']
+ *     statelessFragmentDefaultActions: ['aws:forward_to_sfe']
+ *     statefulRuleGroups:
+ *       - name: accelerator-stateful-group
+ *     statelessRuleGroups:
+ *       - name: accelerator-stateless-group
+ *         priority: 100
+ *   regions:
+ *     - us-east-1
+ *   shareTargets:
+ *     organizationalUnits:
+ *       - Root
+ *   tags: []
+ * ```
  */
 export class NfwFirewallPolicyConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwFirewallPolicyConfig> {
   /**
@@ -3347,10 +4977,18 @@ export class NfwFirewallPolicyConfig implements t.TypeOf<typeof NetworkConfigTyp
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwFirewallConfig} / {@link NfwLoggingConfig}*
+ *
  * Network Firewall logging configuration.
  * Used to define logging destinations for Network Firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-networkfirewall-loggingconfiguration-logdestinationconfig.html}
+ *
+ * @example
+ * ```
+ * - destination: s3
+ *   type: ALERT
+ * ```
  */
 export class NfwLoggingConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwLoggingConfig> {
   /**
@@ -3368,10 +5006,27 @@ export class NfwLoggingConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwL
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig} / {@link NfwFirewallConfig}*
+ *
  * Network Firewall firewall configuration.
  * Used to define a Network Firewall firewall.
  *
  * @see {@link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-networkfirewall-firewall.html}
+ *
+ * @example
+ * ```
+ * - name: accelerator-nfw
+ *   description: Accelerator Firewall
+ *   firewallPolicy: accelerator-nfw-policy
+ *   subnets:
+ *     - Subnet-A
+ *     - Subnet-B
+ *   vpc: Network-Inspection
+ *   loggingConfiguration:
+ *     - destination: s3
+ *       type: ALERT
+ *   tags: []
+ * ```
  */
 export class NfwFirewallConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwFirewallConfig> {
   /**
@@ -3419,8 +5074,56 @@ export class NfwFirewallConfig implements t.TypeOf<typeof NetworkConfigTypes.nfw
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link NfwConfig}*
+ *
  * Network Firewall configuration.
  * Used to define Network Firewall configurations for the accelerator.
+ *
+ * @example
+ * ```
+ * networkFirewall:
+ *   firewalls:
+ *     - name: accelerator-nfw
+ *       description: Accelerator Firewall
+ *       firewallPolicy: accelerator-nfw-policy
+ *       subnets:
+ *         - Subnet-A
+ *         - Subnet-B
+ *       vpc: Network-Inspection
+ *       loggingConfiguration:
+ *         - destination: s3
+ *           type: ALERT
+ *       tags: []
+ *   policies:
+ *     - name: accelerator-nfw-policy
+ *       firewallPolicy:
+ *         statelessDefaultActions: ['aws:forward_to_sfe']
+ *         statelessFragmentDefaultActions: ['aws:forward_to_sfe']
+ *         statefulRuleGroups:
+ *           - name: accelerator-stateful-group
+ *         statelessRuleGroups:
+ *           - name: accelerator-stateless-group
+ *             priority: 100
+ *       regions:
+ *         - us-east-1
+ *       shareTargets:
+ *         organizationalUnits:
+ *           - Root
+ *       tags: []
+ *   rules:
+ *     - name: accelerator-stateful-group
+ *       regions:
+ *         - us-east-1
+ *       capacity: 100
+ *       type: STATEFUL
+ *       ruleGroup:
+ *         rulesSource:
+ *           rulesFile: path/to/rules.txt
+ *       shareTargets:
+ *         organizationalUnits:
+ *           - Root
+ *       tags: []
+ * ```
  */
 export class NfwConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwConfig> {
   /**
@@ -3444,20 +5147,21 @@ export class NfwConfig implements t.TypeOf<typeof NetworkConfigTypes.nfwConfig> 
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link GwlbConfig} / {@link GwlbEndpointConfig}*
+ *
  * Gateway Load Balancer endpoint configuration.
  * Use to define Gateway Load Balancer endpoints.
  *
  * @example
  * ```
- * endpoints:
- *   - name: Endpoint-A
- *     account: Network
- *     subnet: Network-Inspection-A
- *     vpc: Network-Inspection
- *   - name: Endpoint-B
- *     account: Network
- *     subnet: Network-Inspection-B
- *     vpc: Network-Inspection
+ * - name: Endpoint-A
+ *   account: Network
+ *   subnet: Network-Inspection-A
+ *   vpc: Network-Inspection
+ * - name: Endpoint-B
+ *   account: Network
+ *   subnet: Network-Inspection-B
+ *   vpc: Network-Inspection
  * ```
  */
 export class GwlbEndpointConfig implements t.TypeOf<typeof NetworkConfigTypes.gwlbEndpointConfig> {
@@ -3480,6 +5184,8 @@ export class GwlbEndpointConfig implements t.TypeOf<typeof NetworkConfigTypes.gw
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig} / {@link GwlbConfig}*
+ *
  * Gateway Load Balancer configuration.
  * Used to define Gateway Load Balancer configurations for the accelerator.
  *
@@ -3529,14 +5235,34 @@ export class GwlbConfig implements t.TypeOf<typeof NetworkConfigTypes.gwlbConfig
    */
   readonly deletionProtection: boolean | undefined = undefined;
   /**
+   * The friendly name of a target group to forward traffic to
+   *
+   * @remarks
+   * This target group must be defined in `Ec2FirewallConfig`
+   * in the `customizations-config.yaml` configuration file
+   */
+  readonly targetGroup: string | undefined = undefined;
+  /**
    * An optional array of CloudFormation tag objects.
    */
   readonly tags: t.Tag[] | undefined = undefined;
 }
 
 /**
+ * *{@link NetworkConfig} / {@link CentralNetworkServicesConfig}*
+ *
  * Central network services configuration.
  * Used to define centralized networking services for the accelerator.
+ *
+ * @example
+ * ```
+ * centralNetworkServices:
+ *   delegatedAdminAccount: Network
+ *   gatewayLoadBalancers: []
+ *   ipams: []
+ *   networkFirewall: []
+ *   route53Resolver: []
+ * ```
  */
 export class CentralNetworkServicesConfig implements t.TypeOf<typeof NetworkConfigTypes.centralNetworkServicesConfig> {
   /**
@@ -3570,8 +5296,20 @@ export class CentralNetworkServicesConfig implements t.TypeOf<typeof NetworkConf
 }
 
 /**
+ * *{@link NetworkConfig} / {@link VpcPeeringConfig}*
+ *
  * VPC peering configuration.
  * Used to define VPC peering connections.
+ *
+ * @example
+ * ```
+ * vpcPeering:
+ *   - name: Peering
+ *     vpcs:
+ *       - VPC-A
+ *       - VPC-B
+ *     tags: []
+ * ```
  */
 export class VpcPeeringConfig implements t.TypeOf<typeof NetworkConfigTypes.vpcPeeringConfig> {
   /**
@@ -3594,6 +5332,116 @@ export class VpcPeeringConfig implements t.TypeOf<typeof NetworkConfigTypes.vpcP
 export class ElbAccountIdsConfig implements t.TypeOf<typeof NetworkConfigTypes.elbAccountIdsConfig> {
   readonly region: string = '';
   readonly accountId: string = '';
+}
+
+/**
+ * *{@link NetworkConfig} / {@link FirewallManagerConfig} / {@link FirewallManagerNotificationChannelConfig}*
+ * An optional Firewall Manager Service Config
+ */
+export class FirewallManagerNotificationChannelConfig
+  implements t.TypeOf<typeof NetworkConfigTypes.firewallManagerNotificationChannelConfig>
+{
+  /**
+   * Enables the FMS notification channel. Defaults to enabled.
+   */
+  readonly region: string = '';
+  /**
+   * The SNS Topic Name to publish to.
+   */
+  readonly snsTopic: string = '';
+}
+
+/**
+ * *{@link NetworkConfig} / {@link CertificateConfig}*
+ *
+ * Amazon Certificate Manager (ACM) Configuration
+ *
+ * {@link https://docs.aws.amazon.com/acm/latest/userguide/import-certificate.html | Import certificate}  or {@link https://docs.aws.amazon.com/acm/latest/userguide/gs-acm-request-public.html | Request certificate} from ACM
+ *
+ * @example
+ * ```
+ * - name: cert1
+ *   type: import
+ *   privKey: cert1/privKey.key
+ *   cert: cert1/cert.crt
+ *   chain: cert1/chain.csr
+ *   deploymentTargets:
+ *     accounts:
+ *       - WorkloadAccount1
+ *       - WorkloadAccount2
+ * - name: cert2
+ *   type: request
+ *   validation: DNS
+ *   domain: example.com
+ *   san:
+ *     - www.example.com
+ *     - www.example.net
+ *     - e.co
+ *   deploymentTargets:
+ *     OU:
+ *       - Infrastructure
+ * ```
+ */
+export class CertificateConfig implements t.TypeOf<typeof NetworkConfigTypes.certificateConfig> {
+  /**
+   * Name of the certificate. This should be unique in the certificates array. Duplicate names will fail the validation.
+   */
+  readonly name: string = '';
+  /**
+   * Type of ACM cert. Valid values are `import` or `request`
+   */
+  readonly type: t.TypeOf<typeof NetworkConfigTypes.certificateConfigTypeEnum> = 'import';
+  /**
+   * Path to the private key in S3 assets bucket. The bucket value is in the outputs of Pipeline stack in home region. Path should be given relative to the bucket.
+   * The private key that matches the public key in the certificate.
+   * This value should be provided when type is set to import or else validation fails.
+   */
+  readonly privKey: string | undefined = undefined;
+  /**
+   * Path to certificate in S3 assets bucket. The bucket value is in the outputs of Pipeline stack in home region. Path should be given relative to the bucket.
+   * The certificate to import.
+   * This value should be provided when type is set to import or else validation fails.
+   */
+  readonly cert: string | undefined = undefined;
+  /**
+   * Path to the PEM encoded certificate chain in S3 assets bucket. The bucket value is in the outputs of Pipeline stack in home region. Path should be given relative to the bucket.
+   * This value is optional when type is set to import.
+   */
+  readonly chain: string | undefined = undefined;
+  /**
+   * The method you want to use if you are requesting a public certificate to validate that you own or control domain. You can validate with DNS or validate with email.
+   * Valid values are 'DNS' or 'EMAIL'.
+   * This value should be provided when type is set to request or else validation fails.
+   */
+  readonly validation: t.TypeOf<typeof NetworkConfigTypes.certificateValidationEnum> = 'EMAIL';
+  /**
+   * Fully qualified domain name (FQDN), such as www.example.com, that you want to secure with an ACM certificate. Use an asterisk (*) to create a wildcard certificate that protects several sites in the same domain. For example, *.example.com protects www.example.com, site.example.com, and images.example.com.
+   * In compliance with RFC 5280, the length of the domain name (technically, the Common Name) that you provide cannot exceed 64 octets (characters), including periods. To add a longer domain name, specify it in the Subject Alternative Name field, which supports names up to 253 octets in length.
+   * This value should be provided when type is set to request or else validation fails.
+   */
+  readonly domain: string | undefined = undefined;
+  /**
+   * Additional FQDNs to be included in the Subject Alternative Name extension of the ACM certificate. For example, add the name www.example.net to a certificate for which the DomainName field is www.example.com if users can reach your site by using either name.
+   */
+  readonly san: string[] | undefined = undefined;
+  /**
+   * ACM deployment target. This should be provided to deploy ACM into OUs or account.
+   */
+  readonly deploymentTargets: t.DeploymentTargets = new t.DeploymentTargets();
+}
+/**
+ * *{@link NetworkConfig} / {@link FirewallManagerConfig}*
+ * An optional Firewall Manager Service Config
+ */
+export class FirewallManagerConfig implements t.TypeOf<typeof NetworkConfigTypes.firewallManagerServiceConfig> {
+  /**
+   * The friendly account name to deploy the FMS configuration
+   */
+  readonly delegatedAdminAccount: string = '';
+  /**
+   * The FMS Notification Channel Configuration
+   */
+  readonly notificationChannels: FirewallManagerNotificationChannelConfig[] | undefined = undefined;
 }
 /**
  * Network Configuration.
@@ -3618,6 +5466,20 @@ export class NetworkConfig implements t.TypeOf<typeof NetworkConfigTypes.network
    * @see {@link TransitGatewayConfig}
    */
   readonly transitGateways: TransitGatewayConfig[] = [];
+
+  /**
+   * Transit Gateway peering configuration.
+   *
+   * @see {@link TransitGatewayPeeringConfig}
+   */
+  readonly transitGatewayPeering: TransitGatewayPeeringConfig[] = [];
+
+  /**
+   * An array of Customer Gateway configurations.
+   *
+   * @see {@link CustomerGatewayConfig}
+   */
+  readonly customerGateways: CustomerGatewayConfig[] | undefined = undefined;
 
   /**
    * A list of VPC configurations.
@@ -3696,841 +5558,69 @@ export class NetworkConfig implements t.TypeOf<typeof NetworkConfigTypes.network
   readonly elbAccountIds: ElbAccountIdsConfig[] | undefined = undefined;
 
   /**
+   * Firewall manager service configuration
+   */
+  readonly firewallManagerService: FirewallManagerConfig | undefined = undefined;
+  /**
+   * Certificate manager configuration
+   */
+  readonly certificates: CertificateConfig[] | undefined = undefined;
+  /**
    *
    * @param values
-   * @param configDir
-   * @param validateConfig
    */
-  constructor(
-    values?: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    configDir?: string,
-    validateConfig?: boolean,
-  ) {
-    const errors: string[] = [];
-    const ouIdNames: string[] = ['Root'];
+  constructor(values?: t.TypeOf<typeof NetworkConfigTypes.networkConfig>) {
+    Object.assign(this, values);
+  }
+
+  /**
+   * Function to get list of account names which will be used as account principal for TGE peering role
+   * @param accepterAccountName
+   * @returns
+   */
+  public getTgwRequestorAccountNames(accepterAccountName: string): string[] {
     const accountNames: string[] = [];
 
-    const domainLists: { name: string; document: string }[] = [];
-
-    if (values) {
-      if (configDir && validateConfig) {
-        //
-        // Get list of OU ID names from organization config file
-        this.getOuIdNames(configDir, ouIdNames);
-
-        //
-        // Get list of Account names from account config file
-        this.getAccountNames(configDir, accountNames);
-        //
-        // Prepare Endpoint policy list
-        this.prepareEndpointPolicies(values);
-
-        //
-        // Prepare Custom domain list
-        this.prepareCustomDomainList(values, domainLists);
-
-        // Validate Endpoint policy document file existence
-        this.validateEndpointPolicyDocumentFile(configDir, errors);
-
-        // Custom domain lists
-        this.validateCustomDomainListDocumentFile(configDir, domainLists, errors);
-
-        //
-        // Validate deployment target OUs
-        this.validateDeploymentTargetOUs(values, ouIdNames, errors);
-
-        //
-        // Validate deployment target accounts
-        this.validateDeploymentTargetAccountNames(values, accountNames, errors);
-
-        //
-        // Validate VPC configurations
-        this.validateVpcConfiguration(values, errors);
-
-        //
-        // Validate TGW configurations
-        this.validateTgwConfiguration(values, errors);
-
-        //
-        // Validate DX gateway configurations
-        this.validateDxConfiguration(values, errors);
-
-        //
-        // Validate GWLB configuration
-        this.validateGwlbConfiguration(values, errors);
+    for (const transitGatewayPeeringItem of this.transitGatewayPeering ?? []) {
+      if (transitGatewayPeeringItem.accepter.account === accepterAccountName) {
+        accountNames.push(transitGatewayPeeringItem.requester.account);
       }
-
-      if (errors.length) {
-        throw new Error(`${NetworkConfig.FILENAME} has ${errors.length} issues: ${errors.join(' ')}`);
-      }
-
-      Object.assign(this, values);
     }
+    return accountNames;
   }
 
   /**
-   * Prepare list of OU ids from organization config file
-   * @param configDir
+   * Function to get requester or accepter config of tgw peering
+   * @param peeringName
+   * @param peerType
+   * @returns
    */
-  private getOuIdNames(configDir: string, ouIdNames: string[]) {
-    for (const organizationalUnit of OrganizationConfig.load(configDir).organizationalUnits) {
-      ouIdNames.push(organizationalUnit.name);
-    }
-  }
-
-  /**
-   * Prepare list of Account names from account config file
-   * @param configDir
-   */
-  private getAccountNames(configDir: string, accountNames: string[]) {
-    for (const accountItem of [
-      ...AccountsConfig.load(configDir).mandatoryAccounts,
-      ...AccountsConfig.load(configDir).workloadAccounts,
-    ]) {
-      accountNames.push(accountItem.name);
-    }
-  }
-
-  /**
-   * Function to validate existence of Transit Gateway deployment target OUs
-   * Make sure deployment target OUs are part of Organization config file
-   * @param values
-   */
-  private validateTgwDeploymentTargetOUs(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    for (const transitGateway of values.transitGateways ?? []) {
-      for (const ou of transitGateway.shareTargets?.organizationalUnits ?? []) {
-        if (ouIdNames.indexOf(ou) === -1) {
-          errors.push(
-            `Deployment target OU ${ou} for transit gateways ${transitGateway.name} does not exists in organization-config.yaml file.`,
-          );
+  public getTgwPeeringRequesterAccepterConfig(
+    peeringName: string,
+    peerType: 'requester' | 'accepter',
+  ): TransitGatewayPeeringRequesterConfig | TransitGatewayPeeringAccepterConfig | undefined {
+    for (const transitGatewayPeering of this.transitGatewayPeering) {
+      if (transitGatewayPeering.name === peeringName) {
+        if (peerType === 'requester') {
+          return transitGatewayPeering.requester;
+        } else {
+          return transitGatewayPeering.accepter;
         }
       }
     }
-  }
 
-  /**
-   * Function to validate existence of IPAM pool deployment target OUs
-   * Make sure deployment target OUs are part of Organization config file
-   * @param values
-   */
-  private validateIpamPoolDeploymentTargetOUs(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    for (const ipam of values.centralNetworkServices?.ipams ?? []) {
-      for (const pool of ipam.pools ?? []) {
-        for (const ou of pool.shareTargets?.organizationalUnits ?? []) {
-          if (ouIdNames.indexOf(ou) === -1) {
-            errors.push(
-              `Deployment target OU ${ou} for IPAM pool ${pool.name} does not exists in organization-config.yaml file.`,
-            );
-          }
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of transit deployment target accounts
-   * Make sure deployment target accounts are part of account config file
-   * @param values
-   */
-  private validateTgwDeploymentTargetAccounts(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    for (const transitGateway of values.transitGateways ?? []) {
-      for (const account of transitGateway.shareTargets?.accounts ?? []) {
-        if (accountNames.indexOf(account) === -1) {
-          errors.push(
-            `Deployment target account ${account} for transit gateway ${transitGateway.name} does not exists in accounts-config.yaml file.`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of IPAM pool deployment target accounts
-   * Make sure deployment target accounts are part of account config file
-   * @param values
-   */
-  private validateIpamPoolDeploymentTargetAccounts(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    for (const ipam of values.centralNetworkServices?.ipams ?? []) {
-      for (const pool of ipam.pools ?? []) {
-        for (const account of pool.shareTargets?.accounts ?? []) {
-          if (accountNames.indexOf(account) === -1) {
-            errors.push(
-              `Deployment target account ${account} for IPAM pool ${pool.name} does not exists in accounts-config.yaml file.`,
-            );
-          }
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of VPC deployment target accounts
-   * Make sure deployment target accounts are part of account config file
-   * @param values
-   */
-  private validateVpcTemplatesDeploymentTargetAccounts(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    for (const vpc of values.vpcTemplates ?? []) {
-      for (const account of vpc.deploymentTargets?.accounts ?? []) {
-        if (accountNames.indexOf(account) === -1) {
-          errors.push(
-            `Deployment target account ${account} for VPC template ${vpc.name} does not exist in accounts-config.yaml file.`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of VPC deployment target OUs
-   * Make sure deployment target OUs are part of Organization config file
-   * @param values
-   */
-  private validateVpcTemplatesDeploymentTargetOUs(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    for (const vpc of values.vpcTemplates ?? []) {
-      for (const ou of vpc.deploymentTargets?.organizationalUnits ?? []) {
-        if (ouIdNames.indexOf(ou) === -1) {
-          errors.push(
-            `Deployment target OU ${ou} for VPC template ${vpc.name} does not exist in organization-config.yaml file.`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of GWLB deployment target accounts
-   * Make sure deployment target accounts are part of account config file
-   * @param values
-   */
-  private validateGwlbDeploymentTargetAccounts(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    for (const gwlb of values.centralNetworkServices?.gatewayLoadBalancers ?? []) {
-      for (const endpoint of gwlb.endpoints ?? []) {
-        if (accountNames.indexOf(endpoint.account) === -1) {
-          errors.push(
-            `Deployment target account ${endpoint.account} for Gateway Load Balancer ${gwlb.name} endpoint ${endpoint.name} does not exist in accounts-config.yaml file.`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate Deployment targets OU name for network services
-   * @param values
-   */
-  private validateDeploymentTargetOUs(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    this.validateTgwDeploymentTargetOUs(values, ouIdNames, errors);
-    this.validateIpamPoolDeploymentTargetOUs(values, ouIdNames, errors);
-    this.validateVpcTemplatesDeploymentTargetOUs(values, ouIdNames, errors);
-  }
-
-  /**
-   * Function to validate Deployment targets account name for network services
-   * @param values
-   */
-  private validateDeploymentTargetAccountNames(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    this.validateTgwDeploymentTargetAccounts(values, accountNames, errors);
-    this.validateIpamPoolDeploymentTargetAccounts(values, accountNames, errors);
-    this.validateVpcTemplatesDeploymentTargetAccounts(values, accountNames, errors);
-    this.validateGwlbDeploymentTargetAccounts(values, accountNames, errors);
-  }
-
-  /**
-   * Function to prepare Endpoint policies
-   * @param values
-   */
-  private prepareEndpointPolicies(values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>) {
-    for (const policy of values.endpointPolicies ?? []) {
-      this.endpointPolicies.push(policy);
-    }
-  }
-
-  /**
-   * Function to prepare custom domain list
-   * @param values
-   */
-  private prepareCustomDomainList(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    domainLists: { name: string; document: string }[],
-  ) {
-    for (const ruleGroup of values.centralNetworkServices?.route53Resolver?.firewallRuleGroups ?? []) {
-      for (const rule of ruleGroup.rules) {
-        if (rule.customDomainList) {
-          domainLists.push({ name: rule.name, document: rule.customDomainList });
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate Endpoint policy document file existence
-   * @param configDir
-   */
-  private validateEndpointPolicyDocumentFile(configDir: string, errors: string[]) {
-    for (const policy of this.endpointPolicies) {
-      if (!fs.existsSync(path.join(configDir, policy.document))) {
-        errors.push(`Endpoint policy ${policy.name} document file ${policy.document} not found!`);
-      }
-    }
-  }
-
-  /**
-   * Function to validate custom domain list document file existence
-   * @param configDir
-   */
-  private validateCustomDomainListDocumentFile(
-    configDir: string,
-    domainLists: { name: string; document: string }[],
-    errors: string[],
-  ) {
-    for (const list of domainLists) {
-      if (!fs.existsSync(path.join(configDir, list.document))) {
-        errors.push(`DNS firewall custom domain list ${list.name} document file ${list.document} not found!`);
-      }
-    }
-  }
-
-  /**
-   * Function to validate conditional dependencies for VPC configurations.
-   * @param values
-   */
-  private validateVpcConfiguration(values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>, errors: string[]) {
-    for (const vpcItem of [...values.vpcs, ...(values.vpcTemplates ?? [])] ?? []) {
-      for (const routeTableItem of vpcItem.routeTables ?? []) {
-        // Throw error if gateway association exists but no internet gateway
-        if (routeTableItem.gatewayAssociation === 'internetGateway' && !vpcItem.internetGateway) {
-          errors.push(
-            `[Route table ${routeTableItem.name} for VPC ${vpcItem.name}]: attempting to configure a gateway association with no IGW attached to the VPC!`,
-          );
-        }
-        // Validate route entries
-        this.validateRouteTableEntries(routeTableItem, vpcItem, values, errors);
-      }
-      // Validate the VPC doesn't have a static CIDR and IPAM defined
-      if (NetworkConfigTypes.vpcConfig.is(vpcItem) && vpcItem.cidrs && vpcItem.ipamAllocations) {
-        errors.push(`[VPC ${vpcItem.name}]: Both a CIDR and IPAM allocation are defined. Please choose only one`);
-      }
-      // Validate IPAM allocations
-      this.validateIpamAllocations(vpcItem, values, errors);
-    }
-  }
-
-  /**
-   * Validate route table entries
-   * @param routeTableItem
-   */
-  private validateRouteTableEntries(
-    routeTableItem: t.TypeOf<typeof NetworkConfigTypes.routeTableConfig>,
-    vpcItem: t.TypeOf<typeof NetworkConfigTypes.vpcConfig> | t.TypeOf<typeof NetworkConfigTypes.vpcTemplatesConfig>,
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    errors: string[],
-  ) {
-    for (const routeTableEntryItem of routeTableItem.routes ?? []) {
-      // Validate destination exists
-      if (routeTableEntryItem.type && routeTableEntryItem.type !== 'gatewayEndpoint') {
-        this.validateRouteEntryDestination(routeTableEntryItem, routeTableItem.name, vpcItem.name, values, errors);
-      }
-
-      // Validate IGW route
-      if (routeTableEntryItem.type && routeTableEntryItem.type === 'internetGateway') {
-        this.validateIgwRouteEntry(routeTableEntryItem, routeTableItem.name, vpcItem, errors);
-      }
-
-      // Validate target exists
-      if (
-        routeTableEntryItem.type &&
-        ['gatewayLoadBalancerEndpoint', 'natGateway', 'networkFirewall', 'transitGateway'].includes(
-          routeTableEntryItem.type,
-        )
-      ) {
-        this.validateRouteEntryTarget(routeTableEntryItem, routeTableItem.name, vpcItem, values, errors);
-      }
-    }
-  }
-
-  /**
-   * Validate route entries have a valid destination configured
-   * @param routeTableEntryItem
-   * @param routeTableName
-   * @param vpcName
-   */
-  private validateRouteEntryDestination(
-    routeTableEntryItem: t.TypeOf<typeof NetworkConfigTypes.routeTableEntryConfig>,
-    routeTableName: string,
-    vpcName: string,
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    errors: string[],
-  ) {
-    if (routeTableEntryItem.destinationPrefixList) {
-      // Check if a CIDR destination is also defined
-      if (routeTableEntryItem.destination) {
-        errors.push(
-          `[Route table ${routeTableName} for VPC ${vpcName}]: route entry ${routeTableEntryItem.name} using destination and destinationPrefixList. Please choose only one destination type`,
-        );
-      }
-
-      // Throw error if network firewall or GWLB are the target
-      if (['networkFirewall', 'gatewayLoadBalancerEndpoint'].includes(routeTableEntryItem.type!)) {
-        errors.push(
-          `[Route table ${routeTableName} for VPC ${vpcName}]: route entry ${routeTableEntryItem.name} with type ${routeTableEntryItem.type} does not support destinationPrefixList`,
-        );
-      }
-
-      // Throw error if prefix list doesn't exist
-      if (!values.prefixLists?.find(item => item.name === routeTableEntryItem.destinationPrefixList)) {
-        errors.push(
-          `[Route table ${routeTableName} for VPC ${vpcName}]: route entry ${routeTableEntryItem.name} destinationPrefixList ${routeTableEntryItem.destinationPrefixList} does not exist`,
-        );
-      }
-    } else {
-      if (!routeTableEntryItem.destination) {
-        errors.push(
-          `[Route table ${routeTableName} for VPC ${vpcName}]: route entry ${routeTableEntryItem.name} does not have a destination defined`,
-        );
-      }
-    }
-  }
-
-  /**
-   * Validate IGW routes are associated with a VPC with an IGW attached
-   * @param routeTableEntryItem
-   * @param routeTableName
-   * @param vpcItem
-   */
-  private validateIgwRouteEntry(
-    routeTableEntryItem: t.TypeOf<typeof NetworkConfigTypes.routeTableEntryConfig>,
-    routeTableName: string,
-    vpcItem: t.TypeOf<typeof NetworkConfigTypes.vpcConfig> | t.TypeOf<typeof NetworkConfigTypes.vpcTemplatesConfig>,
-    errors: string[],
-  ) {
-    if (!vpcItem.internetGateway) {
-      errors.push(
-        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} is targeting an IGW, but now IGW is attached to the VPC`,
-      );
-    }
-  }
-
-  /**
-   * Validate route table entries have a valid target configured
-   * @param routeTableEntryItem
-   * @param routeTableName
-   * @param vpcItem
-   * @param values
-   */
-  private validateRouteEntryTarget(
-    routeTableEntryItem: t.TypeOf<typeof NetworkConfigTypes.routeTableEntryConfig>,
-    routeTableName: string,
-    vpcItem: t.TypeOf<typeof NetworkConfigTypes.vpcConfig> | t.TypeOf<typeof NetworkConfigTypes.vpcTemplatesConfig>,
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    errors: string[],
-  ) {
-    const gwlbs = values.centralNetworkServices?.gatewayLoadBalancers;
-    const networkFirewalls = values.centralNetworkServices?.networkFirewall?.firewalls;
-    const tgws = values.transitGateways;
-    const vpcs = [...values.vpcs, ...(values.vpcTemplates ?? [])];
-
-    // Throw error if no target defined
-    if (!routeTableEntryItem.target) {
-      errors.push(
-        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} of type ${routeTableEntryItem.type} must include a target`,
-      );
-    }
-
-    // Throw error if GWLB endpoint doesn't exist
-    if (
-      routeTableEntryItem.type === 'gatewayLoadBalancerEndpoint' &&
-      !gwlbs?.find(item => item.endpoints.find(endpoint => endpoint.name === routeTableEntryItem.target))
-    ) {
-      errors.push(
-        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} target ${routeTableEntryItem.target} does not exist`,
-      );
-    }
-
-    // Throw error if network firewall endpoint doesn't exist
-    if (
-      routeTableEntryItem.type === 'networkFirewall' &&
-      !networkFirewalls?.find(item => item.name === routeTableEntryItem.target)
-    ) {
-      errors.push(
-        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} target ${routeTableEntryItem.target} does not exist`,
-      );
-    }
-
-    // Throw error if network firewall target AZ doesn't exist
-    if (routeTableEntryItem.type === 'networkFirewall' && !routeTableEntryItem.targetAvailabilityZone) {
-      errors.push(
-        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} with type networkFirewall must include targetAvailabilityZone`,
-      );
-    }
-
-    // Throw error if NAT gateway doesn't exist
-    if (
-      routeTableEntryItem.type === 'natGateway' &&
-      !vpcs.find(item => item.natGateways?.find(nat => nat.name === routeTableEntryItem.target))
-    ) {
-      errors.push(
-        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} target ${routeTableEntryItem.target} does not exist`,
-      );
-    }
-
-    // Throw error if transit gateway doesn't exist
-    if (routeTableEntryItem.type === 'transitGateway' && !tgws.find(item => item.name === routeTableEntryItem.target)) {
-      errors.push(
-        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} target ${routeTableEntryItem.target} does not exist`,
-      );
-    }
-  }
-
-  /**
-   * Function to validate conditional dependencies for TGW configurations
-   * @param values
-   */
-  private validateTgwConfiguration(values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>, errors: string[]) {
-    for (const tgw of values.transitGateways ?? []) {
-      for (const routeTable of tgw.routeTables ?? []) {
-        this.validateTgwStaticRouteEntries(values, tgw, routeTable, errors);
-      }
-    }
-  }
-
-  private validateIpamAllocations(
-    vpcItem: t.TypeOf<typeof NetworkConfigTypes.vpcConfig> | t.TypeOf<typeof NetworkConfigTypes.vpcTemplatesConfig>,
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    errors: string[],
-  ) {
-    const ipams = values.centralNetworkServices?.ipams;
-    // Check if targeted IPAM exists
-    for (const alloc of vpcItem.ipamAllocations ?? []) {
-      if (!ipams?.find(ipam => ipam.pools?.find(pool => pool.name === alloc.ipamPoolName))) {
-        errors.push(`[VPC ${vpcItem.name}]: target IPAM pool ${alloc.ipamPoolName} is not defined`);
-      }
-    }
-    for (const subnet of vpcItem.subnets ?? []) {
-      // Check if allocation is created for VPC
-      if (
-        subnet.ipamAllocation &&
-        !vpcItem.ipamAllocations?.find(alloc => alloc.ipamPoolName === subnet.ipamAllocation!.ipamPoolName)
-      ) {
-        errors.push(
-          `[VPC ${vpcItem.name} subnet ${subnet.name}]: target IPAM pool ${
-            subnet.ipamAllocation!.ipamPoolName
-          } is not a source pool of the VPC`,
-        );
-      }
-      // Check if targeted IPAM pool exists
-      if (
-        subnet.ipamAllocation &&
-        !ipams?.find(ipam => ipam.pools?.find(pool => pool.name === subnet.ipamAllocation!.ipamPoolName))
-      ) {
-        errors.push(
-          `[VPC ${vpcItem.name} subnet ${subnet.name}]: target IPAM pool ${
-            subnet.ipamAllocation!.ipamPoolName
-          } is not defined`,
-        );
-      }
-    }
-  }
-
-  /**
-   * Function to validate TGW route table entries
-   */
-  private validateTgwStaticRouteEntries(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    tgw: t.TypeOf<typeof NetworkConfigTypes.transitGatewayConfig>,
-    routeTable: t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteTableConfig>,
-    errors: string[],
-  ) {
-    for (const entry of routeTable.routes ?? []) {
-      // Catch error if an attachment and blackhole are both defined
-      if (entry.attachment && entry.blackhole) {
-        errors.push(
-          `[Transit Gateway route table ${routeTable.name}]: cannot define both an attachment and blackhole target`,
-        );
-      }
-      // Catch error if destination CIDR and prefix list are both defined
-      if (entry.destinationCidrBlock && entry.destinationPrefixList) {
-        errors.push(
-          `[Transit Gateway route table ${routeTable.name}]: cannot define both a destination CIDR and destination prefix list`,
-        );
-      }
-      // Validate VPC attachment routes
-      this.validateVpcStaticRouteEntry(values, routeTable.name, entry, errors);
-
-      // Validate DX Gateway routes
-      this.validateDxGatewayStaticRouteEntry(values, routeTable.name, tgw, entry, errors);
-    }
-  }
-
-  /**
-   * Function to validate transit gateway static route entries for VPC attachments
-   * @param values
-   * @param routeTableName
-   * @param entry
-   */
-  private validateVpcStaticRouteEntry(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    routeTableName: string,
-    entry: t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteEntryConfig>,
-    errors: string[],
-  ) {
-    if (entry.attachment && NetworkConfigTypes.transitGatewayRouteTableVpcEntryConfig.is(entry.attachment)) {
-      const vpcs = [...values.vpcs, ...(values.vpcTemplates ?? [])];
-      const vpcAttachment = entry.attachment as TransitGatewayRouteTableVpcEntryConfig;
-      const vpc = vpcs.find(item => item.name === vpcAttachment.vpcName);
-      if (!vpc) {
-        errors.push(`[Transit Gateway route table ${routeTableName}]: cannot find VPC ${vpcAttachment.vpcName}`);
-      }
-    }
-  }
-
-  /**
-   * Function to validate transit gateway static route entries for DX attachments
-   * @param values
-   * @param routeTableName
-   * @param entry
-   */
-  private validateDxGatewayStaticRouteEntry(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    routeTableName: string,
-    tgw: t.TypeOf<typeof NetworkConfigTypes.transitGatewayConfig>,
-    entry: t.TypeOf<typeof NetworkConfigTypes.transitGatewayRouteEntryConfig>,
-    errors: string[],
-  ) {
-    if (entry.attachment && NetworkConfigTypes.transitGatewayRouteTableDxGatewayEntryConfig.is(entry.attachment)) {
-      const dxgws = [...(values.directConnectGateways ?? [])];
-      const dxAttachment = entry.attachment as TransitGatewayRouteTableDxGatewayEntryConfig;
-      const dxgw = dxgws.find(item => item.name === dxAttachment.directConnectGatewayName);
-      // Catch error if DXGW doesn't exist
-      if (!dxgw) {
-        errors.push(
-          `[Transit Gateway route table ${routeTableName}]: cannot find DX Gateway ${dxAttachment.directConnectGatewayName}`,
-        );
-      }
-      if (dxgw) {
-        // Catch error if DXGW is not in the same account as the TGW
-        if (dxgw!.account !== tgw.account) {
-          errors.push(
-            `[Transit Gateway route table ${routeTableName}]: cannot add route entry for DX Gateway ${dxAttachment.directConnectGatewayName}. DX Gateway and TGW ${tgw.name} reside in separate accounts`,
-          );
-        }
-        // Catch error if there is no association with the TGW
-        if (!dxgw.transitGatewayAssociations || !dxgw.transitGatewayAssociations.find(item => item.name === tgw.name)) {
-          errors.push(
-            `[Transit Gateway route table ${routeTableName}]: cannot add route entry for DX Gateway ${dxAttachment.directConnectGatewayName}. DX Gateway and TGW ${tgw.name} are not associated`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate DX gateway configurations.
-   * @param values
-   */
-  private validateDxConfiguration(values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>, errors: string[]) {
-    for (const dxgw of values.directConnectGateways ?? []) {
-      // Validate virtual interfaces
-      this.validateDxVirtualInterfaces(dxgw, errors);
-      // Validate transit gateway attachments
-      this.validateDxTransitGatewayAssociations(values, dxgw, errors);
-    }
-  }
-
-  /**
-   * Function to validate DX virtual interface configurations.
-   * @param dxgw
-   */
-  private validateDxVirtualInterfaces(dxgw: t.TypeOf<typeof NetworkConfigTypes.dxGatewayConfig>, errors: string[]) {
-    for (const vif of dxgw.virtualInterfaces ?? []) {
-      // Catch error for private VIFs with transit gateway associations
-      if (vif.type === 'private' && dxgw.transitGatewayAssociations) {
-        errors.push(
-          `[Direct Connect Gateway ${dxgw.name}]: cannot specify private virtual interface ${vif.name} with transit gateway associations`,
-        );
-      }
-      // Catch error if ASNs match
-      if (dxgw.asn === vif.customerAsn) {
-        errors.push(`[Direct Connect Gateway ${dxgw.name}]: Amazon ASN and customer ASN match for ${vif.name}`);
-      }
-      // Catch error if ASN is not in the correct range
-      if (vif.customerAsn < 1 || vif.customerAsn > 2147483647) {
-        errors.push(
-          `[Direct Connect Gateway ${dxgw.name}]: ASN ${vif.customerAsn} out of range 1-2147483647 for virtual interface ${vif.name}`,
-        );
-      }
-      // Catch error if VIF VLAN is not in range
-      if (vif.vlan < 1 || vif.vlan > 4094) {
-        errors.push(
-          `[Direct Connect Gateway ${dxgw.name}]: VLAN ${vif.vlan} out of range 1-4094 for virtual interface ${vif.name}`,
-        );
-      }
-      // Validate peer IP addresses
-      this.validateDxVirtualInterfaceAddresses(dxgw, vif, errors);
-    }
-  }
-
-  /**
-   * Function to validate peer IP addresses for virtual interfaces.
-   * @param dxgw
-   * @param vif
-   */
-  private validateDxVirtualInterfaceAddresses(
-    dxgw: t.TypeOf<typeof NetworkConfigTypes.dxGatewayConfig>,
-    vif: t.TypeOf<typeof NetworkConfigTypes.dxVirtualInterfaceConfig>,
-    errors: string[],
-  ) {
-    // Catch error if one peer IP is defined and not the other
-    if (vif.amazonAddress && !vif.customerAddress) {
-      errors.push(
-        `[Direct Connect Gateway ${dxgw.name}]: Amazon peer IP defined but customer peer IP undefined for ${vif.name}`,
-      );
-    }
-    if (!vif.amazonAddress && vif.customerAddress) {
-      errors.push(
-        `[Direct Connect Gateway ${dxgw.name}]: Customer peer IP defined but Amazon peer IP undefined for ${vif.name}`,
-      );
-    }
-    // Catch error if addresses match
-    if (vif.amazonAddress && vif.customerAddress) {
-      if (vif.amazonAddress === vif.customerAddress) {
-        errors.push(`[Direct Connect Gateway ${dxgw.name}]: Amazon peer IP and customer peer IP match for ${vif.name}`);
-      }
-    }
-  }
-
-  /**
-   * Function to validate DX gateway transit gateway assocations.
-   * @param values
-   * @param dxgw
-   */
-  private validateDxTransitGatewayAssociations(
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    dxgw: t.TypeOf<typeof NetworkConfigTypes.dxGatewayConfig>,
-    errors: string[],
-  ) {
-    for (const tgwAssociation of dxgw.transitGatewayAssociations ?? []) {
-      const tgw = values.transitGateways.find(
-        item => item.name === tgwAssociation.name && item.account === tgwAssociation.account,
-      );
-      // Catch error if TGW isn't found
-      if (!tgw) {
-        errors.push(
-          `[Direct Connect Gateway ${dxgw.name}]: cannot find matching transit gateway for TGW association ${tgwAssociation.name}`,
-        );
-      }
-      // Catch error if ASNs match
-      if (tgw!.asn === dxgw.asn) {
-        errors.push(`[Direct Connect Gateway ${dxgw.name}]: DX Gateway ASN and TGW ASN match for ${tgw!.name}`);
-      }
-      // Catch error if TGW and DXGW account don't match and associations/propagations are configured
-      if (tgw!.account !== dxgw.account) {
-        if (tgwAssociation.routeTableAssociations || tgwAssociation.routeTablePropagations) {
-          errors.push(
-            `[Direct Connect Gateway ${dxgw.name}]: DX Gateway association proposals cannot have TGW route table associations or propagations defined`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Validate Gateway Load Balancer configuration
-   * @param values
-   */
-  private validateGwlbConfiguration(values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>, errors: string[]) {
-    const vpcs = [...values.vpcs, ...(values.vpcTemplates ?? [])];
-    for (const gwlb of values.centralNetworkServices?.gatewayLoadBalancers ?? []) {
-      const vpc = vpcs.find(item => item.name === gwlb.vpc);
-      if (!vpc) {
-        errors.push(`[Gateway Load Balancer ${gwlb.name}]: VPC ${gwlb.vpc} does not exist`);
-      }
-
-      // Validate subnets
-      for (const gwlbSubnet of gwlb.subnets ?? []) {
-        if (vpc && !vpc.subnets?.find(subnet => subnet.name === gwlbSubnet)) {
-          errors.push(`[Gateway Load Balancer ${gwlb.name}]: subnet ${gwlbSubnet} does not exist in VPC ${vpc!.name}`);
-        }
-      }
-
-      // Validate endpoints
-      this.validateGwlbEndpoints(gwlb, values, errors);
-    }
-  }
-
-  /**
-   * Validate Gateway Load Balancer endpoint configuration
-   * @param gwlb
-   * @param values
-   */
-  private validateGwlbEndpoints(
-    gwlb: t.TypeOf<typeof NetworkConfigTypes.gwlbConfig>,
-    values: t.TypeOf<typeof NetworkConfigTypes.networkConfig>,
-    errors: string[],
-  ) {
-    const vpcs = [...values.vpcs, ...(values.vpcTemplates ?? [])];
-    for (const gwlbEndpoint of gwlb.endpoints ?? []) {
-      const vpc = vpcs.find(item => item.name === gwlbEndpoint.vpc);
-      if (!vpc) {
-        errors.push(
-          `[Gateway Load Balancer ${gwlb.name} endpoint ${gwlbEndpoint.name}]: VPC ${gwlbEndpoint.vpc} does not exist`,
-        );
-      }
-
-      // Validate subnet
-      if (vpc && !vpc.subnets?.find(subnet => subnet.name === gwlbEndpoint.subnet)) {
-        errors.push(
-          `[Gateway Load Balancer ${gwlb.name} endpoint ${gwlbEndpoint.name}]: subnet ${gwlbEndpoint.subnet} does not exist in VPC ${vpc.name}`,
-        );
-      }
-    }
+    throw new Error(`Transit gateway peering ${peeringName} not found !!!`);
   }
 
   /**
    *
    * @param dir
-   * @param validateConfig
    * @returns
    */
-  static load(dir: string, validateConfig?: boolean): NetworkConfig {
+  static load(dir: string): NetworkConfig {
     const buffer = fs.readFileSync(path.join(dir, NetworkConfig.FILENAME), 'utf8');
     const values = t.parse(NetworkConfigTypes.networkConfig, yaml.load(buffer));
-    return new NetworkConfig(values, dir, validateConfig);
+    return new NetworkConfig(values);
   }
 
   /**

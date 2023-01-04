@@ -161,6 +161,7 @@ Object {
             },
           },
         ],
+        "Name": "accelerator-inbound",
         "SecurityGroupIds": Array [
           Object {
             "Ref": "AcceleratorInboundEpSecurityGroup562F5EAB",
@@ -221,6 +222,7 @@ Object {
             },
           },
         ],
+        "Name": "accelerator-outbound",
         "SecurityGroupIds": Array [
           Object {
             "Ref": "AcceleratorOutboundEpSecurityGroup37D346D3",
@@ -763,7 +765,8 @@ Object {
           "LogDestinationConfigs": Array [
             Object {
               "LogDestination": Object {
-                "bucketName": "aws-accelerator-central-logs-333333333333-us-east-1",
+                "bucketName": "aws-accelerator-central-logs-333333333333-us-west-2",
+                "prefix": "firewall",
               },
               "LogDestinationType": "S3",
               "LogType": "ALERT",
@@ -852,7 +855,7 @@ Object {
       "Properties": Object {
         "Name": "/accelerator/AWSAccelerator-NetworkVpcEndpointsStack-555555555555-us-east-1/version",
         "Type": "String",
-        "Value": "1.2.2",
+        "Value": "1.3.0",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -969,6 +972,9 @@ Object {
       "Type": "AWS::SSM::Parameter",
     },
     "SsmParamNetworkEndpointskmsDns52AB3E63": Object {
+      "DependsOn": Array [
+        "SsmParamNetworkEndpointsssmDnsADE5D35A",
+      ],
       "Properties": Object {
         "Name": "/accelerator/network/vpc/Network-Endpoints/endpoints/kms/dns",
         "Type": "String",
@@ -1025,6 +1031,9 @@ Object {
       "Type": "AWS::SSM::Parameter",
     },
     "SsmParamNetworkEndpointslogsDns987F0AF9": Object {
+      "DependsOn": Array [
+        "SsmParamNetworkEndpointskmsPhz4C558915",
+      ],
       "Properties": Object {
         "Name": "/accelerator/network/vpc/Network-Endpoints/endpoints/logs/dns",
         "Type": "String",
@@ -1053,6 +1062,9 @@ Object {
       "Type": "AWS::SSM::Parameter",
     },
     "SsmParamNetworkEndpointslogsPhzDC71A382": Object {
+      "DependsOn": Array [
+        "SsmParamNetworkEndpointskmsPhz4C558915",
+      ],
       "Properties": Object {
         "Name": "/accelerator/network/vpc/Network-Endpoints/endpoints/logs/hostedZoneId",
         "Type": "String",
@@ -1109,6 +1121,9 @@ Object {
       "Type": "AWS::SSM::Parameter",
     },
     "SsmParamNetworkEndpointsssmPhzF2C37E80": Object {
+      "DependsOn": Array [
+        "SsmParamNetworkEndpointsssmDnsADE5D35A",
+      ],
       "Properties": Object {
         "Name": "/accelerator/network/vpc/Network-Endpoints/endpoints/ssm/hostedZoneId",
         "Type": "String",
@@ -1137,6 +1152,9 @@ Object {
       "Type": "AWS::SSM::Parameter",
     },
     "SsmParamNetworkEndpointsssmmessagesDns075A6D34": Object {
+      "DependsOn": Array [
+        "SsmParamNetworkEndpointsssmDnsADE5D35A",
+      ],
       "Properties": Object {
         "Name": "/accelerator/network/vpc/Network-Endpoints/endpoints/ssmmessages/dns",
         "Type": "String",
@@ -1165,6 +1183,9 @@ Object {
       "Type": "AWS::SSM::Parameter",
     },
     "SsmParamNetworkEndpointsssmmessagesPhzE73CA844": Object {
+      "DependsOn": Array [
+        "SsmParamNetworkEndpointsssmDnsADE5D35A",
+      ],
       "Properties": Object {
         "Name": "/accelerator/network/vpc/Network-Endpoints/endpoints/ssmmessages/hostedZoneId",
         "Type": "String",
@@ -1213,6 +1234,9 @@ Object {
       "Type": "AWS::SSM::Parameter",
     },
     "SsmParamacceleratorInboundResolverEndpoint80E88844": Object {
+      "DependsOn": Array [
+        "SsmParamNetworkEndpointskmsPhz4C558915",
+      ],
       "Properties": Object {
         "Name": "/accelerator/network/route53Resolver/endpoints/accelerator-inbound/id",
         "Type": "String",
@@ -1226,6 +1250,9 @@ Object {
       "Type": "AWS::SSM::Parameter",
     },
     "SsmParamacceleratorOutboundResolverEndpoint9F3A81CE": Object {
+      "DependsOn": Array [
+        "SsmParamNetworkEndpointskmsPhz4C558915",
+      ],
       "Properties": Object {
         "Name": "/accelerator/network/route53Resolver/endpoints/accelerator-outbound/id",
         "Type": "String",

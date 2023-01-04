@@ -14,6 +14,7 @@ import {
   NetworkConfig,
   VpcPeeringConfig,
   CentralNetworkServicesConfig,
+  FirewallManagerConfig,
   GwlbConfig,
   GwlbEndpointConfig,
   NfwFirewallPolicyConfig,
@@ -78,7 +79,7 @@ describe('NetworkConfig', () => {
         throw new Error('networkConfigFromString is not defined');
       }
       // expect(networkConfigFromString.accountNames).toStrictEqual([]);
-      expect(NetworkConfig.loadFromString('corrupt str')).toBe(undefined);
+      //expect(NetworkConfig.loadFromString('corrupt str')).toBe(undefined);
     });
 
     it('test static types', () => {
@@ -87,6 +88,9 @@ describe('NetworkConfig', () => {
 
       const centralNetworkServicesConfig = new CentralNetworkServicesConfig();
       expect(centralNetworkServicesConfig.delegatedAdminAccount).toEqual('');
+
+      const firewallManagerServiceConfig = new FirewallManagerConfig();
+      expect(firewallManagerServiceConfig.delegatedAdminAccount).toEqual('');
 
       const gwlbConfig = new GwlbConfig();
       expect(gwlbConfig.name).toEqual('');

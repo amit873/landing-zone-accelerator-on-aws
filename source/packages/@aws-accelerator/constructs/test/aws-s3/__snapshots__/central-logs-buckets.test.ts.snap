@@ -422,6 +422,7 @@ Object {
                   "config.amazonaws.com",
                   "cloudtrail.amazonaws.com",
                   "delivery.logs.amazonaws.com",
+                  "ssm.amazonaws.com",
                 ],
               },
               "Resource": "*",
@@ -617,6 +618,7 @@ Object {
                   "cloudtrail.amazonaws.com",
                   "config.amazonaws.com",
                   "delivery.logs.amazonaws.com",
+                  "ssm.amazonaws.com",
                 ],
               },
               "Resource": Object {

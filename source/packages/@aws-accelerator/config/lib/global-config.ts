@@ -15,10 +15,11 @@ import * as emailValidator from 'email-validator';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
 import * as path from 'path';
-import * as t from './common-types';
 
-import { OrganizationConfig } from './organization-config';
 import { AccountsConfig } from './accounts-config';
+import * as t from './common-types';
+import { OrganizationConfig } from './organization-config';
+import { IamConfig } from './iam-config';
 
 /**
  * Global configuration items.
@@ -64,6 +65,7 @@ export abstract class GlobalConfigTypes {
     excludeRegions: t.optional(t.array(t.region)),
     excludeAccounts: t.optional(t.array(t.string)),
     lifecycleRules: t.optional(t.array(t.lifecycleRuleConfig)),
+    attachPolicyToIamRoles: t.optional(t.array(t.string)),
   });
 
   static readonly accessLogBucketConfig = t.interface({
@@ -72,18 +74,37 @@ export abstract class GlobalConfigTypes {
 
   static readonly centralLogBucketConfig = t.interface({
     lifecycleRules: t.array(t.lifecycleRuleConfig),
+    s3ResourcePolicyAttachments: t.optional(t.array(t.resourcePolicyStatement)),
+    kmsResourcePolicyAttachments: t.optional(t.array(t.resourcePolicyStatement)),
+  });
+
+  static readonly elbLogBucketConfig = t.interface({
+    lifecycleRules: t.array(t.lifecycleRuleConfig),
+    s3ResourcePolicyAttachments: t.optional(t.array(t.resourcePolicyStatement)),
+  });
+
+  static readonly cloudWatchLogsExclusionConfig = t.interface({
+    organizationalUnits: t.optional(t.array(t.nonEmptyString)),
+    regions: t.optional(t.array(t.region)),
+    accounts: t.optional(t.array(t.nonEmptyString)),
+    excludeAll: t.optional(t.boolean),
+    logGroupNames: t.optional(t.array(t.nonEmptyString)),
   });
 
   static readonly cloudwatchLogsConfig = t.interface({
-    dynamicPartitioning: t.nonEmptyString,
+    dynamicPartitioning: t.optional(t.nonEmptyString),
+    enable: t.optional(t.boolean),
+    exclusions: t.optional(t.array(GlobalConfigTypes.cloudWatchLogsExclusionConfig)),
   });
 
   static readonly loggingConfig = t.interface({
     account: t.nonEmptyString,
+    centralizedLoggingRegion: t.optional(t.nonEmptyString),
     cloudtrail: GlobalConfigTypes.cloudTrailConfig,
     sessionManager: GlobalConfigTypes.sessionManagerConfig,
     accessLogBucket: t.optional(GlobalConfigTypes.accessLogBucketConfig),
     centralLogBucket: t.optional(GlobalConfigTypes.centralLogBucketConfig),
+    elbLogBucket: t.optional(GlobalConfigTypes.elbLogBucketConfig),
     cloudwatchLogs: t.optional(GlobalConfigTypes.cloudwatchLogsConfig),
   });
 
@@ -139,6 +160,13 @@ export abstract class GlobalConfigTypes {
     deploymentTargets: t.optional(t.deploymentTargets),
   });
 
+  static readonly serviceQuotaLimitsConfig = t.interface({
+    serviceCode: t.string,
+    quotaCode: t.string,
+    desiredValue: t.number,
+    deploymentTargets: t.deploymentTargets,
+  });
+
   static readonly reportConfig = t.interface({
     costAndUsageReport: t.optional(this.costAndUsageReportConfig),
     budgets: t.optional(t.array(this.budgetConfig)),
@@ -153,6 +181,21 @@ export abstract class GlobalConfigTypes {
     vaults: t.array(this.vaultConfig),
   });
 
+  static readonly snsTopicConfig = t.interface({
+    name: t.nonEmptyString,
+    emailAddresses: t.array(t.nonEmptyString),
+  });
+
+  static readonly snsConfig = t.interface({
+    deploymentTargets: t.optional(t.deploymentTargets),
+    topics: t.optional(t.array(this.snsTopicConfig)),
+  });
+
+  static readonly ssmInventoryConfig = t.interface({
+    enable: t.boolean,
+    deploymentTargets: t.deploymentTargets,
+  });
+
   static readonly globalConfig = t.interface({
     homeRegion: t.nonEmptyString,
     enabledRegions: t.array(t.region),
@@ -164,11 +207,22 @@ export abstract class GlobalConfigTypes {
     logging: GlobalConfigTypes.loggingConfig,
     reports: t.optional(GlobalConfigTypes.reportConfig),
     backup: t.optional(GlobalConfigTypes.backupConfig),
+    snsTopics: t.optional(GlobalConfigTypes.snsConfig),
+    ssmInventory: t.optional(GlobalConfigTypes.ssmInventoryConfig),
+    limits: t.optional(t.array(this.serviceQuotaLimitsConfig)),
   });
 }
 
 /**
+ * *{@link GlobalConfig} / {@link ControlTowerConfig}*
+ *
  * AWS ControlTower configuration
+ *
+ * @example
+ * ```
+ * controlTower:
+ *   enable: true
+ * ```
  */
 export class ControlTowerConfig implements t.TypeOf<typeof GlobalConfigTypes.controlTowerConfig> {
   /**
@@ -178,11 +232,19 @@ export class ControlTowerConfig implements t.TypeOf<typeof GlobalConfigTypes.con
    * In AWS Control Tower, three shared accounts in your landing zone are provisioned automatically during setup: the management account,
    * the log archive account, and the audit account.
    */
-  readonly enable = true;
+  readonly enable: boolean = true;
 }
 
 /**
+ * *{@link GlobalConfig} / {@link centralizeCdkBucketsConfig}*
+ *
  * AWS CDK Centralization configuration
+ *
+ * @example
+ * ```
+ * centralizeCdkBuckets:
+ *   enable: true
+ * ```
  */
 export class centralizeCdkBucketsConfig implements t.TypeOf<typeof GlobalConfigTypes.centralizeCdkBucketsConfig> {
   /**
@@ -195,7 +257,21 @@ export class centralizeCdkBucketsConfig implements t.TypeOf<typeof GlobalConfigT
 }
 
 /**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link CloudTrailConfig} / ({@link AccountCloudTrailConfig}) / {@link CloudTrailSettingsConfig}*
+ *
  * AWS CloudTrail Settings configuration
+ *
+ * @example
+ * ```
+ * multiRegionTrail: true
+ * globalServiceEvents: true
+ * managementEvents: true
+ * s3DataEvents: true
+ * lambdaDataEvents: true
+ * sendToCloudWatchLogs: true
+ * apiErrorRateInsight: false
+ * apiCallRateInsight: false
+ * ```
  */
 export class CloudTrailSettingsConfig implements t.TypeOf<typeof GlobalConfigTypes.cloudTrailSettingsConfig> {
   /**
@@ -229,7 +305,8 @@ export class CloudTrailSettingsConfig implements t.TypeOf<typeof GlobalConfigTyp
    */
   lambdaDataEvents = true;
   /**
-   * If CloudTrail pushes logs to CloudWatch Logs in addition to S3.
+   * If CloudTrail pushes logs to CloudWatch Logs in addition to S3.  CloudWatch Logs
+   * will also be replicated to S3.
    */
   sendToCloudWatchLogs = true;
   /**
@@ -242,6 +319,30 @@ export class CloudTrailSettingsConfig implements t.TypeOf<typeof GlobalConfigTyp
   readonly apiCallRateInsight = false;
 }
 
+/**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link CloudTrailConfig} / {@link AccountCloudTrailConfig}*
+ *
+ * Account CloudTrail config
+ *
+ * @example
+ * ```
+ * - name: AWSAccelerator-Account-CloudTrail
+ *   regions:
+ *     - us-east-1
+ *   deploymentTargets:
+ *     organizationalUnits:
+ *       - Root
+ *   settings:
+ *     multiRegionTrail: true
+ *     globalServiceEvents: true
+ *     managementEvents: true
+ *     s3DataEvents: true
+ *     lambdaDataEvents: true
+ *     sendToCloudWatchLogs: true
+ *     apiErrorRateInsight: false
+ *     apiCallRateInsight: false
+ * ```
+ */
 export class AccountCloudTrailConfig implements t.TypeOf<typeof GlobalConfigTypes.accountCloudTrailConfig> {
   /**
    * Name that will be used to create the CloudTrail.
@@ -262,7 +363,27 @@ export class AccountCloudTrailConfig implements t.TypeOf<typeof GlobalConfigType
 }
 
 /**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link CloudTrailConfig} / {@link AccountCloudTrailConfig}*
+ *
  * AWS Cloudtrail configuration
+ *
+ * @example
+ * ```
+ * cloudtrail:
+ *   enable: true
+ *   organizationTrail: true
+ *   organizationTrailSettings:
+ *     multiRegionTrail: true
+ *     globalServiceEvents: true
+ *     managementEvents: true
+ *     s3DataEvents: true
+ *     lambdaDataEvents: true
+ *     sendToCloudWatchLogs: true
+ *     apiErrorRateInsight: false
+ *     apiCallRateInsight: false
+ *   accountTrails: []
+ *   lifecycleRules: []
+ * ```
  */
 export class CloudTrailConfig implements t.TypeOf<typeof GlobalConfigTypes.cloudTrailConfig> {
   /**
@@ -297,7 +418,44 @@ export class CloudTrailConfig implements t.TypeOf<typeof GlobalConfigTypes.cloud
 }
 
 /**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link SessionManagerConfig}*
+ *
+ * AWS Service Quotas configuration
+ */
+export class ServiceQuotaLimitsConfig implements t.TypeOf<typeof GlobalConfigTypes.serviceQuotaLimitsConfig> {
+  /**
+   * Indicates which service Service Quota is changing the limit for.
+   */
+  readonly serviceCode = '';
+  /**
+   * Indicates the code for the service as these are tied to the account.
+   *
+   */
+  readonly quotaCode = '';
+  /**
+   * Value associated with the limit change.
+   */
+  readonly desiredValue = 2000;
+  /**
+   * List of AWS Account names to be included in the Service Quota changes
+   */
+  readonly deploymentTargets: t.DeploymentTargets = new t.DeploymentTargets();
+}
+
+/**
  * AWS SessionManager configuration
+ *
+ * @example
+ * ```
+ * sessionManager:
+ *   sendToCloudWatchLogs: true
+ *   sendToS3: true
+ *   excludeRegions: []
+ *   excludeAccounts: []
+ *   lifecycleRules: []
+ *   attachPolicyToIamRoles:
+ *     - EC2-Default-SSM-AD-Role
+ * ```
  */
 export class SessionManagerConfig implements t.TypeOf<typeof GlobalConfigTypes.sessionManagerConfig> {
   /**
@@ -322,10 +480,35 @@ export class SessionManagerConfig implements t.TypeOf<typeof GlobalConfigTypes.s
    * S3 Lifecycle rule for log storage
    */
   readonly lifecycleRules: t.LifeCycleRule[] = [];
+  /**
+   * List of IAM EC2 roles that the Session Manager
+   * access policy should be attached to
+   */
+  readonly attachPolicyToIamRoles = [];
 }
 
 /**
- * Accelerator global logging configuration
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link AccessLogBucketConfig}*
+ *
+ * Accelerator global S3 access logging configuration
+ *
+ * @example
+ * ```
+ * accessLogBucket:
+ *   lifecycleRules:
+ *     - enabled: true
+ *       id: AccessLifecycle
+ *       abortIncompleteMultipartUpload: 15
+ *       expiration: 3563
+ *       expiredObjectDeleteMarker: true
+ *       noncurrentVersionExpiration: 3653
+ *       noncurrentVersionTransitions:
+ *         - storageClass: GLACIER
+ *           transitionAfter: 365
+ *       transitions:
+ *         - storageClass: GLACIER
+ *           transitionAfter: 365
+ * ```
  */
 export class AccessLogBucketConfig implements t.TypeOf<typeof GlobalConfigTypes.accessLogBucketConfig> {
   /**
@@ -333,23 +516,196 @@ export class AccessLogBucketConfig implements t.TypeOf<typeof GlobalConfigTypes.
    */
   readonly lifecycleRules: t.LifeCycleRule[] = [];
 }
+
+/**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link CentralLogBucketConfig}*
+ *
+ * Accelerator global S3 central logging configuration
+ *
+ * @example
+ * ```
+ * centralLogBucket:
+ *   lifecycleRules:
+ *     - enabled: true
+ *       id: CentralLifecycle
+ *       abortIncompleteMultipartUpload: 14
+ *       expiration: 3563
+ *       expiredObjectDeleteMarker: true
+ *       noncurrentVersionExpiration: 3653
+ *       noncurrentVersionTransitions:
+ *         - storageClass: GLACIER
+ *           transitionAfter: 365
+ *       transitions:
+ *         - storageClass: GLACIER
+ *           transitionAfter: 365
+ *   s3ResourcePolicyAttachments:
+ *     - policy: s3-policies/policy1.json
+ *   s3KmsPolicyAttachments:
+ *     - policy: kms-policies/policy1.json
+ * ```
+ */
 export class CentralLogBucketConfig implements t.TypeOf<typeof GlobalConfigTypes.centralLogBucketConfig> {
   /**
    * Declaration of (S3 Bucket) Lifecycle rules.
+   * Configure additional resource policy attachments
    */
   readonly lifecycleRules: t.LifeCycleRule[] = [];
+  readonly s3ResourcePolicyAttachments: t.ResourcePolicyStatement[] | undefined = undefined;
+  readonly kmsResourcePolicyAttachments: t.ResourcePolicyStatement[] | undefined = undefined;
 }
 
 /**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link ElbLogBucketConfig}*
+ *
+ * Accelerator global S3 elb logging configuration
+ *
+ * @example
+ * ```
+ * elbLogBucket:
+ *   lifecycleRules:
+ *     - enabled: true
+ *       id: ElbLifecycle
+ *       abortIncompleteMultipartUpload: 14
+ *       expiration: 3563
+ *       expiredObjectDeleteMarker: true
+ *       noncurrentVersionExpiration: 3653
+ *       noncurrentVersionTransitions:
+ *         - storageClass: GLACIER
+ *           transitionAfter: 365
+ *       transitions:
+ *         - storageClass: GLACIER
+ *           transitionAfter: 365
+ *   s3ResourcePolicyAttachments:
+ *     - policy: s3-policies/policy1.json
+ * ```
+ */
+export class ElbLogBucketConfig implements t.TypeOf<typeof GlobalConfigTypes.elbLogBucketConfig> {
+  /**
+   * Declaration of (S3 Bucket) Lifecycle rules.
+   * Configure additional resource policy attachments
+   */
+  readonly lifecycleRules: t.LifeCycleRule[] = [];
+  readonly s3ResourcePolicyAttachments: t.ResourcePolicyStatement[] | undefined = undefined;
+}
+/**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link CloudWatchLogsConfig}/ {@link CloudWatchLogsExclusionConfig}*
+ *
+ * Accelerator global CloudWatch Logs exclusion configuration
+ *
+ * @example
+ * ```
+ * organizationalUnits:
+ *  - Sandbox
+ * regions:
+ *  - us-west-1
+ *  - us-west-2
+ * accounts:
+ *  - WorkloadAccount1
+ * excludeAll: true
+ * logGroupNames:
+ *  - 'test/*'
+ *  - '/appA/*'
+ *
+ * ```
+ */
+export class CloudWatchLogsExclusionConfig implements t.TypeOf<typeof GlobalConfigTypes.cloudWatchLogsExclusionConfig> {
+  /**
+   * List of OUs that the exclusion will apply to
+   */
+  readonly organizationalUnits: string[] | undefined = undefined;
+  /**
+   * List of regions where the exclusion will be applied to. If no value is supplied, exclusion is applied to all enabled regions.
+   */
+  readonly regions: t.Region[] | undefined = undefined;
+  /**
+   * List of accounts where the exclusion will be applied to
+   */
+  readonly accounts: string[] | undefined = undefined;
+  /**
+   * Exclude replication on all logs. By default this is set to true.
+   *
+   * @remarks
+   * If undefined, this is set to true. When set to false, it disables replication on entire OU or account for that region. Setting OU as `Root` with no region specified and making this false will fail validation since that usage is redundant. Instead use the {@link CloudWatchLogsConfig | enable} parameter in cloudwatch log config which will disable replication across all accounts in all regions.
+   */
+  readonly excludeAll: boolean | undefined = undefined;
+  /**
+   * List of log groups names where the exclusion will be applied to
+   *
+   * @remarks
+   * Wild cards are supported. These log group names are added in the eventbridge payload which triggers lambda. If `excludeAll` is used then all logGroups are excluded and this parameter is not used.
+   */
+  readonly logGroupNames: string[] | undefined = undefined;
+}
+
+/**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link CloudWatchLogsConfig}*
+ *
  * Accelerator global CloudWatch Logs logging configuration
+ *
+ * @example
+ * ```
+ * cloudwatchLogs:
+ *   dynamicPartitioning: path/to/filter.json
+ *   # default is true, if undefined this is set to true
+ *   # if set to false, no replication is performed which is useful in test or temporary environments
+ *   enable: true
+ *   exclusions:
+ *    # in these OUs do not do log replication
+ *    - organizationalUnits:
+ *        - Research
+ *        - ProofOfConcept
+ *      excludeAll: true
+ *    # in these accounts exclude pattern testApp
+ *    - accounts:
+ *        - WorkloadAccount1
+ *        - WorkloadAccount1
+ *      logGroupNames:
+ *        - testApp*
+ *    # in these accounts exclude logs in specific regions
+ *    - accounts:
+ *        - WorkloadAccount1
+ *        - WorkloadAccount1
+ *      regions:
+ *        - us-west-2
+ *        - eu-west-1
+ *      logGroupNames:
+ *        - pattern1*
+ * ```
+ *
  */
 export class CloudWatchLogsConfig implements t.TypeOf<typeof GlobalConfigTypes.cloudwatchLogsConfig> {
   /**
    * Declaration of Dynamic Partition for Kinesis Firehose.
    */
-  readonly dynamicPartitioning: string = '';
+  readonly dynamicPartitioning: string | undefined = undefined;
+  /**
+   * Enable or disable CloudWatch replication
+   */
+  readonly enable: boolean | undefined = undefined;
+  /**
+   * Exclude Log Groups during replication
+   */
+  readonly exclusions: CloudWatchLogsExclusionConfig[] | undefined = undefined;
 }
 
+/**
+ * *{@link GlobalConfig} / {@link LoggingConfig}*
+ *
+ * Global logging configuration
+ *
+ * @example
+ * ```
+ * logging:
+ *   account: LogArchive
+ *   centralizedLoggingRegion: us-east-1
+ *   cloudtrail:
+ *     enable: false
+ *     organizationTrail: false
+ *   sessionManager:
+ *     sendToCloudWatchLogs: false
+ *     sendToS3: true
+ * ```
+ */
 export class LoggingConfig implements t.TypeOf<typeof GlobalConfigTypes.loggingConfig> {
   /**
    * Accelerator logging account name.
@@ -357,6 +713,12 @@ export class LoggingConfig implements t.TypeOf<typeof GlobalConfigTypes.loggingC
    * This account maintains consolidated logs.
    */
   readonly account = 'LogArchive';
+  /**
+   * Accelerator central logs bucket region name.
+   * Accelerator use CentralLogs bucket to store various log files, Accelerator created buckets and CWL replicates to CentralLogs bucket.
+   * CentralLogs bucket region is optional, when not provided this bucket will be created in Accelerator home region.
+   */
+  readonly centralizedLoggingRegion: undefined | string = undefined;
   /**
    * CloudTrail logging configuration
    */
@@ -374,13 +736,39 @@ export class LoggingConfig implements t.TypeOf<typeof GlobalConfigTypes.loggingC
    */
   readonly centralLogBucket: CentralLogBucketConfig | undefined = undefined;
   /**
+   * Declaration of a (S3 Bucket) Lifecycle rule configuration.
+   */
+  readonly elbLogBucket: ElbLogBucketConfig | undefined = undefined;
+  /**
    * CloudWatch Logging configuration.
    */
   readonly cloudwatchLogs: CloudWatchLogsConfig | undefined = undefined;
 }
 
 /**
+ * *{@link GlobalConfig} / {@link ReportConfig} / {@link CostAndUsageReportConfig}*
+ *
  * CostAndUsageReport configuration
+ *
+ * @example
+ * ```
+ * costAndUsageReport:
+ *     compression: Parquet
+ *     format: Parquet
+ *     reportName: accelerator-cur
+ *     s3Prefix: cur
+ *     timeUnit: DAILY
+ *     refreshClosedReports: true
+ *     reportVersioning: CREATE_NEW_REPORT
+ *     lifecycleRules:
+ *       storageClass: DEEP_ARCHIVE
+ *       enabled: true
+ *       multiPart: 1
+ *       expiration: 1825
+ *       deleteMarker: false
+ *       nonCurrentExpiration: 366
+ *       transitionAfter: 365
+ * ```
  */
 export class CostAndUsageReportConfig implements t.TypeOf<typeof GlobalConfigTypes.costAndUsageReportConfig> {
   /**
@@ -426,7 +814,37 @@ export class CostAndUsageReportConfig implements t.TypeOf<typeof GlobalConfigTyp
 }
 
 /**
+ * *{@link GlobalConfig} / {@link ReportConfig} / {@link BudgetReportConfig}*
+ *
  * BudgetReport configuration
+ *
+ * @example
+ * ```
+ * budgets:
+ *     - name: accel-budget
+ *       timeUnit: MONTHLY
+ *       type: COST
+ *       amount: 2000
+ *       includeUpfront: true
+ *       includeTax: true
+ *       includeSupport: true
+ *       includeSubscription: true
+ *       includeRecurring: true
+ *       includeOtherSubscription: true
+ *       includeDiscount: true
+ *       includeCredit: false
+ *       includeRefund: false
+ *       useBlended: false
+ *       useAmortized: false
+ *       unit: USD
+ *       notification:
+ *       - type: ACTUAL
+ *         thresholdType: PERCENTAGE
+ *         threshold: 90
+ *         comparisonOperator: GREATER_THAN
+ *         subscriptionType: EMAIL
+ *         address: myemail+pa-budg@example.com
+ * ```
  */
 export class BudgetReportConfig implements t.TypeOf<typeof GlobalConfigTypes.budgetConfig> {
   /**
@@ -549,6 +967,8 @@ export class BudgetReportConfig implements t.TypeOf<typeof GlobalConfigTypes.bud
 }
 
 /**
+ * {@link GlobalConfig} / {@link ReportConfig}
+ *
  * Accelerator report configuration
  */
 export class ReportConfig implements t.TypeOf<typeof GlobalConfigTypes.reportConfig> {
@@ -614,6 +1034,19 @@ export class ReportConfig implements t.TypeOf<typeof GlobalConfigTypes.reportCon
   readonly budgets: BudgetReportConfig[] = [];
 }
 
+/**
+ * *{@link GlobalConfig} / {@link BackupConfig} / {@link VaultConfig}*
+ *
+ * Backup vault configuration
+ *
+ * @example
+ * ```
+ * - name: BackupVault
+ *   deploymentTargets:
+ *     organizationalUnits:
+ *      - Root
+ * ```
+ */
 export class VaultConfig implements t.TypeOf<typeof GlobalConfigTypes.vaultConfig> {
   /**
    * Name that will be used to create the vault.
@@ -626,11 +1059,120 @@ export class VaultConfig implements t.TypeOf<typeof GlobalConfigTypes.vaultConfi
   readonly deploymentTargets: t.DeploymentTargets = new t.DeploymentTargets();
 }
 
+/**
+ * *{@link GlobalConfig} / {@link BackupConfig}*
+ *
+ * AWS Backup configuration
+ *
+ * @example
+ * ```
+ * backup:
+ *   vaults:
+ *     - name: BackupVault
+ *       deploymentTargets:
+ *         organizationalUnits:
+ *           - Root
+ * ```
+ */
 export class BackupConfig implements t.TypeOf<typeof GlobalConfigTypes.backupConfig> {
   /**
    * List of AWS Backup Vaults
    */
   readonly vaults: VaultConfig[] = [];
+}
+
+/**
+ *
+ * *{@link GlobalConfig} / {@link SnsConfig} / {@link SnsTopicConfig}*
+ *
+ * SNS Topics Configuration
+ *
+ * To send CloudWatch Alarms and SecurityHub notifications
+ * you will need to configure at least one SNS Topic
+ * For SecurityHub notification you will need
+ * to set the deployment target to Root in order
+ * to receive notifications from all accounts
+ *
+ * @example
+ * ```
+ * snsTopics:
+ *   depoymentTargets:
+ *     organizationalUnits:
+ *       - Root
+ *     topics:
+ *       - name: Security
+ *         emailAddresses:
+ *           - SecurityNotifications@example.com
+ * ```
+ */
+export class SnsTopicConfig implements t.TypeOf<typeof GlobalConfigTypes.snsTopicConfig> {
+  /**
+   * *{@link GlobalConfig} / {@link SnsTopicConfig} / {@link TopicConfig}*
+   *
+   * SNS Topic Config
+   *
+   * @example
+   * ```
+   * - name: Security
+   *   emailAddresses:
+   *     - SecurityNotifications@example.com
+   * ```
+   */
+  /**
+   * List of SNS Topics definition
+   */
+
+  /**
+   * SNS Topic Name
+   */
+  readonly name = 'Security';
+
+  /**
+   * List of email address for notification
+   */
+  readonly emailAddresses = [];
+}
+
+/**
+ * *{@link globalConfig} / {@link SnsConfig}*
+ */
+export class SnsConfig implements t.TypeOf<typeof GlobalConfigTypes.snsConfig> {
+  /**
+   * Deployment targets for SNS topics
+   * SNS Topics will always be deployed to the Log Archive account
+   * email subscriptions will be in the Log Archive account
+   * All other accounts and regions will forward to the Logging account
+   */
+  readonly deploymentTargets: t.DeploymentTargets = new t.DeploymentTargets();
+  /**
+   * List of SNS Topics
+   */
+  readonly topics: SnsTopicConfig[] = [];
+}
+
+/**
+ * *{@link globalConfig} / {@link SsmInventoryConfig}*
+ *
+ * @example
+ * ```
+ * ssmInventoryConfig:
+ *   enable: true
+ *   deploymentTargets:
+ *     organizationalUnits:
+ *       - Infrastructure
+ * ```
+ *
+ */
+
+export class SsmInventoryConfig implements t.TypeOf<typeof GlobalConfigTypes.ssmInventoryConfig> {
+  /**
+   * Enable SSM Inventory
+   */
+  readonly enable = false;
+  /**
+   * Configure the Deployment Targets
+   */
+  readonly deploymentTargets: t.DeploymentTargets = new t.DeploymentTargets();
 }
 
 /**
@@ -678,7 +1220,7 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
    * - AWSControlTowerExecution
    * - OrganizationAccountAccessRole
    */
-  readonly managementAccountAccessRole = 'AWSControlTowerExecution';
+  readonly managementAccountAccessRole: string = '';
 
   /**
    * CloudWatchLogs retention in days, accelerator's custom resource lambda function logs retention period is configured based on this value.
@@ -782,6 +1324,23 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
   readonly reports: ReportConfig | undefined = undefined;
 
   /**
+   * AWS Service Quota - Limit configuration
+   *
+   * To enable limits within service quota, you need to provide below value for this parameter.
+   *
+   * @example
+   * ```
+   * limits:
+   *     - serviceCode: lambda
+   *       quotaCode: L-2ACBD22F
+   *       value: 2000
+   *       deploymentTargets:
+   *           - organizationalUnits: root
+   *             accounts:
+   */
+  readonly limits: ServiceQuotaLimitsConfig[] = [];
+
+  /**
    * Backup Vaults Configuration
    *
    * To generate vaults, you need to provide below value for this parameter.
@@ -799,6 +1358,47 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
   readonly backup: BackupConfig | undefined = undefined;
 
   /**
+   * SNS Topics Configuration
+   *
+   * To send CloudWatch Alarms and SecurityHub notifications
+   * you will need to configure at least one SNS Topic
+   * For SecurityHub notification you will need
+   * to set the deployment target to Root in order
+   * to receive notifications from all accounts
+   *
+   * @example
+   * ```
+   * snsTopics:
+   *   depoymentTargets:
+   *     organizationalUnits:
+   *       - Root
+   *     topics:
+   *       - name: Security
+   *         emailAddresses:
+   *           - SecurityNotifications@example.com
+   * ```
+   */
+  readonly snsTopics: SnsConfig | undefined = undefined;
+
+  /**
+   * SSM Inventory Configuration
+   *
+   * [EC2 prerequisites](https://docs.aws.amazon.com/systems-manager/latest/userguide/sysman-inventory-walk.html)
+   * [Connectivity prerequisites](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-prereqs.html)
+   *
+   * @example
+   * ```
+   * ssmInventory:
+   *   enable: true
+   *   deploymentTargets:
+   *     organizationalUnits:
+   *       - Infrastructure
+   * ```
+   *
+   */
+  readonly ssmInventory: SsmInventoryConfig | undefined = undefined;
+
+  /**
    *
    * @param props
    * @param values
@@ -808,6 +1408,8 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
   constructor(
     props: {
       homeRegion: string;
+      controlTower: { enable: boolean };
+      managementAccountAccessRole: string;
     },
     values?: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
     configDir?: string,
@@ -835,6 +1437,10 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
         //
         this.validateLoggingAccountName(values, accountNames, errors);
         //
+        // Validate CentralLogs bucket region name
+        //
+        this.validateCentralLogsBucketRegionName(values, errors);
+        //
         // Validate budget deployment target OU
         //
         this.validateBudgetDeploymentTargetOUs(values, ouIdNames, errors);
@@ -845,18 +1451,32 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
         //
         // lifecycle rule expiration validation
         //
-        this.validateLifecycleRuleExpiration(values, errors);
+        this.validateLifecycleRuleExpirationForCentralLogBucket(values, errors);
+        this.validateLifecycleRuleExpirationForAccessLogBucket(values, errors);
+        this.validateLifecycleRuleExpirationForReports(values, errors);
         //
         // validate cloudwatch logging
         //
-        this.validateCloudWatchDynamicPartition(values, configDir, errors);
+        this.validateCloudWatch(values, configDir, ouIdNames, accountNames, errors);
+
         // cloudtrail settings validation
         //
         this.validateCloudTrailSettings(values, errors);
+        // snsTopics settings validation
+        //
+        this.validateSnsTopics(values, errors);
+        // central log bucket resource policy attachment validation
+        this.validateCentralLogsS3ResourcePolicyFileExists(configDir, values, errors);
+        this.validateCentralLogsKmsResourcePolicyFileExists(configDir, values, errors);
+        // sessionManager settings validation
+        //
+        this.validateSessionManager(values, configDir, errors);
       }
     } else {
       this.homeRegion = props.homeRegion;
       this.enabledRegions = [props.homeRegion as t.Region];
+      this.controlTower = props.controlTower;
+      this.managementAccountAccessRole = props.managementAccountAccessRole;
     }
 
     if (errors.length) {
@@ -926,6 +1546,30 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
   }
 
   /**
+   * Function to validate existence of central logs bucket region in enabled region list
+   * CentralLogs bucket region name must part of pipeline enabled region
+   * @param values
+   * @param errors
+   */
+  private validateCentralLogsBucketRegionName(
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    errors: string[],
+  ) {
+    if (values.logging.centralizedLoggingRegion) {
+      for (const region of this.enabledRegions) {
+        if (region === values.logging.centralizedLoggingRegion) {
+          return;
+        }
+      }
+      errors.push(
+        `CentralLogs bucket region name ${
+          values.logging.centralizedLoggingRegion
+        } not part of pipeline enabled regions [${this.enabledRegions.toString()}].`,
+      );
+    }
+  }
+
+  /**
    * Function to validate budget notification email address
    * @param values
    */
@@ -943,13 +1587,142 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
   }
 
   /**
-   * Function to validate S3 lifecycle expiration to be smaller than noncurrentVersionExpiration
+   * Function to validate S3 lifecycle rules for Cost Reporting
    * @param values
    */
-  private validateLifecycleRuleExpiration(values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>, errors: string[]) {
+  private validateLifecycleRuleExpirationForReports(
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    errors: string[],
+  ) {
     for (const lifecycleRule of values.reports?.costAndUsageReport?.lifecycleRules ?? []) {
-      if (lifecycleRule.noncurrentVersionExpiration! <= lifecycleRule.expiration!) {
-        errors.push('The nonCurrentVersionExpiration value must be greater than that of the expiration value.');
+      if (lifecycleRule.expiration && !lifecycleRule.noncurrentVersionExpiration) {
+        errors.push('You must supply a value for noncurrentVersionExpiration. Cost Reporting');
+      }
+      if (!lifecycleRule.abortIncompleteMultipartUpload) {
+        errors.push('You must supply a value for abortIncompleteMultipartUpload. Cost Reporting');
+      }
+      if (lifecycleRule.expiration && lifecycleRule.expiredObjectDeleteMarker) {
+        errors.push('You may not configure expiredObjectDeleteMarker with expiration. Cost Reporting');
+      }
+    }
+  }
+
+  /**
+   * Function to validate S3 lifecycle rules Central Log Bucket
+   * @param values
+   */
+  private validateLifecycleRuleExpirationForCentralLogBucket(
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    errors: string[],
+  ) {
+    for (const lifecycleRule of values.logging.centralLogBucket?.lifecycleRules ?? []) {
+      if (lifecycleRule.expiration && !lifecycleRule.noncurrentVersionExpiration) {
+        errors.push('You must supply a value for noncurrentVersionExpiration. Central Log Bucket');
+      }
+      if (!lifecycleRule.abortIncompleteMultipartUpload) {
+        errors.push('You must supply a value for abortIncompleteMultipartUpload. Central Log Bucket');
+      }
+      if (lifecycleRule.expiration && lifecycleRule.expiredObjectDeleteMarker) {
+        errors.push('You may not configure expiredObjectDeleteMarker with expiration. Central Log Bucket');
+      }
+    }
+  }
+
+  private validateLifecycleRuleExpirationForAccessLogBucket(
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    errors: string[],
+  ) {
+    for (const lifecycleRule of values.logging.centralLogBucket?.lifecycleRules ?? []) {
+      if (lifecycleRule.expiration && !lifecycleRule.noncurrentVersionExpiration) {
+        errors.push('You must supply a value for noncurrentVersionExpiration. S3 Access Log Bucket');
+      }
+      if (!lifecycleRule.abortIncompleteMultipartUpload) {
+        errors.push('You must supply a value for abortIncompleteMultipartUpload. S3 Access Log Bucket');
+      }
+      if (lifecycleRule.expiration && lifecycleRule.expiredObjectDeleteMarker) {
+        errors.push('You may not configure expiredObjectDeleteMarker with expiration. S3 Access Log Bucket');
+      }
+    }
+  }
+
+  /**
+   * Validate CloudWatch Logs replication
+   */
+  private validateCloudWatch(
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    configDir: string,
+    ouIdNames: string[],
+    accountNames: string[],
+    errors: string[],
+  ) {
+    if (values.logging.cloudwatchLogs?.enable ?? true) {
+      if (values.logging.cloudwatchLogs?.dynamicPartitioning) {
+        //
+        // validate cloudwatch logging dynamic partition
+        //
+        this.validateCloudWatchDynamicPartition(values, configDir, errors);
+      }
+      if (values.logging.cloudwatchLogs?.exclusions) {
+        //
+        // validate cloudwatch logs exclusion config
+        //
+        this.validateCloudWatchExclusions(values, ouIdNames, accountNames, errors);
+      }
+    }
+  }
+
+  /**
+   * Validate Cloudwatch logs exclusion inputs
+   */
+  private validateCloudWatchExclusions(
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    ouIdNames: string[],
+    accountNames: string[],
+    errors: string[],
+  ) {
+    for (const exclusion of values.logging.cloudwatchLogs?.exclusions ?? []) {
+      // check if users input array of Organization Units is valid
+      this.validateCloudWatchExclusionsTargets(exclusion.organizationalUnits ?? [], ouIdNames, errors);
+      // check if users input array of accounts is valid
+      this.validateCloudWatchExclusionsTargets(exclusion.accounts ?? [], accountNames, errors);
+      // check if OU is root and excludeAll is provided
+      const foundRoot = exclusion.organizationalUnits?.find(ou => {
+        return ou === 'Root';
+      });
+      if (foundRoot && exclusion.excludeAll === true) {
+        errors.push(`CloudWatch exclusion found root OU with excludeAll instead set enable: false cloudwatchLogs.`);
+      }
+
+      // if logGroupNames are provided then ensure OUs or accounts are provided
+      const ouLength = exclusion.organizationalUnits?.length ?? 0;
+      const accountLength = exclusion.accounts?.length ?? 0;
+      if (exclusion.logGroupNames && ouLength === 0 && accountLength === 0) {
+        errors.push(
+          `CloudWatch exclusion logGroupNames (${exclusion.logGroupNames.join(
+            ',',
+          )}) are provided but no account or OU specified.`,
+        );
+      }
+
+      // if excludeAll is provided then ensure OU or accounts are provided
+      if (exclusion.excludeAll === true && ouLength === 0 && accountLength === 0) {
+        errors.push(`CloudWatch exclusion excludeAll was specified but no account or OU specified.`);
+      }
+
+      // either specify logGroupNames or excludeAll
+      if (exclusion.excludeAll === undefined && exclusion.logGroupNames === undefined) {
+        errors.push(`CloudWatch exclusion either specify excludeAll or logGroupNames.`);
+      }
+    }
+  }
+
+  private validateCloudWatchExclusionsTargets(inputList: string[], globalList: string[], errors: string[]) {
+    for (const input of inputList) {
+      // from the input list pick each element,
+      // if OU or account name is in global config pass
+      // else bubble up the error
+      if (!globalList.includes(input)) {
+        errors.push(`CloudWatch exclusions invalid value ${input} provided. Current values: ${globalList.join(',')}.`);
       }
     }
   }
@@ -986,6 +1759,74 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
     }
   }
 
+  private validateSnsTopics(values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>, errors: string[]) {
+    if (values.snsTopics) {
+      for (const snsTopic of values.snsTopics.topics ?? []) {
+        console.log(`email count: ${snsTopic.emailAddresses.length}`);
+        if (snsTopic.emailAddresses.length < 1) {
+          errors.push(`Must be at least one email address for the snsTopic named ${snsTopic.name}`);
+        }
+      }
+    }
+  }
+
+  private validateSessionManager(
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    configDir: string,
+    errors: string[],
+  ) {
+    const iamConfig = IamConfig.load(configDir);
+    const iamRoleNames: string[] = [];
+    for (const roleSet of iamConfig.roleSets) {
+      for (const role of roleSet.roles) {
+        iamRoleNames.push(role.name);
+      }
+    }
+    for (const iamRoleName of values.logging.sessionManager.attachPolicyToIamRoles ?? []) {
+      if (!iamRoleNames.find(item => item === iamRoleName)) {
+        errors.push(
+          `Could not find the role named ${iamRoleName} in the IAM config file. Role was used in the Session Manager configuration.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Validate s3 resource policy file existence
+   * @param configDir
+   * @param values
+   * @returns
+   */
+  private validateCentralLogsS3ResourcePolicyFileExists(
+    configDir: string,
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    errors: string[],
+  ) {
+    for (const policy of values.logging.centralLogBucket?.s3ResourcePolicyAttachments ?? []) {
+      if (!fs.existsSync(path.join(configDir, policy.policy))) {
+        errors.push(`Policy definition file ${policy.policy} not found !!!`);
+      }
+    }
+  }
+
+  /**
+   * Validate s3 resource policy file existence
+   * @param configDir
+   * @param values
+   * @returns
+   */
+  private validateCentralLogsKmsResourcePolicyFileExists(
+    configDir: string,
+    values: t.TypeOf<typeof GlobalConfigTypes.globalConfig>,
+    errors: string[],
+  ) {
+    for (const policy of values.logging.centralLogBucket?.kmsResourcePolicyAttachments ?? []) {
+      if (!fs.existsSync(path.join(configDir, policy.policy))) {
+        errors.push(`Policy definition file ${policy.policy} not found !!!`);
+      }
+    }
+  }
+
   // Check if input is valid array and proceed to check schema
   private checkForArray(inputStr: string, errorMessage: string, errors: string[]) {
     if (Array.isArray(inputStr)) {
@@ -1000,8 +1841,6 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
     for (const eachItem of inputStr) {
       if (!this.isDynamicLogType(eachItem)) {
         errors.push(`Key value ${JSON.stringify(eachItem)} is incorrect. ${errorMessage}`);
-      } else {
-        console.log('Dynamic Partition is valid.');
       }
     }
   }
@@ -1035,6 +1874,10 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
     }
   }
 
+  public getSnsTopicNames(): string[] {
+    return this.snsTopics?.topics.flatMap(item => item.name) ?? [];
+  }
+
   /**
    * Load from file in given directory
    * @param dir
@@ -1046,10 +1889,14 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
     const values = t.parse(GlobalConfigTypes.globalConfig, yaml.load(buffer));
 
     const homeRegion = values.homeRegion;
+    const controlTower = values.controlTower;
+    const managementAccountAccessRole = values.managementAccountAccessRole;
 
     return new GlobalConfig(
       {
         homeRegion,
+        controlTower,
+        managementAccountAccessRole,
       },
       values,
       dir,

@@ -25,6 +25,9 @@ transitGateways:
           - destinationCidrBlock: 10.200.0.0/16
             attachment:
               directConnectGatewayName: Network-DXGW
+          - destinationCidrBlock: 10.300.0.0/16
+            attachment:
+              vpnConnectionName: accelerator-vpn
           - destinationCidrBlock: 1.1.1.1/32
             blackhole: true
           - destinationPrefixList: accelerator-prefix-list
@@ -34,9 +37,62 @@ transitGateways:
       - name: Network-Main-Segregated
         routes: []
       - name: Network-Main-Shared
-        routes: []
+        routes:
+          - destinationCidrBlock: 10.200.0.0/16
+            attachment:
+              transitGatewayPeeringName: Network-Main-And-SharedServices-Main-Peering
       - name: Network-Main-Standalone
         routes: []
+  - name: SharedServices-Main
+    account: SharedServices
+    region: *HOME_REGION
+    shareTargets:
+      organizationalUnits:
+        - Infrastructure
+    asn: 64512
+    dnsSupport: enable
+    vpnEcmpSupport: enable
+    defaultRouteTableAssociation: disable
+    defaultRouteTablePropagation: disable
+    autoAcceptSharingAttachments: enable
+    routeTables:
+      - name: SharedServices-Main-Core
+        routes: []
+      - name: SharedServices-Main-Segregated
+        routes: []
+      - name: SharedServices-Main-Shared
+        routes:
+          - destinationCidrBlock: 10.100.0.0/16
+            attachment:
+              transitGatewayPeeringName: Network-Main-And-SharedServices-Main-Peering
+      - name: SharedServices-Main-Standalone
+        routes: []
+transitGatewayPeering:
+  - name: Network-Main-And-SharedServices-Main-Peering
+    requester:
+      transitGatewayName: SharedServices-Main
+      account: SharedServices
+      region: *HOME_REGION
+      routeTableAssociations: SharedServices-Main-Shared
+      tags:
+        - key: Name
+          value: Network-Main-And-SharedServices-Main-Peering
+        - key: CostCenter
+          value: TSD-LZA
+        - key: Company
+          value: AWS
+        - key: Organization
+          value: WWPS
+        - key: Team
+          value: Development
+    accepter:
+      transitGatewayName: Network-Main
+      account: Network
+      region: *HOME_REGION
+      routeTableAssociations: Network-Main-Shared
+      # autoAccept: true
+      # applyTags: false
+
 dhcpOptions:
   - name: accelerator-dhcp-opts
     accounts:
@@ -101,6 +157,7 @@ centralNetworkServices:
         - Network-Inspection-B
       vpc: Network-Inspection
       deletionProtection: true
+      targetGroup: instance-target
       endpoints:
         - name: Endpoint-A
           account: Network
@@ -129,8 +186,8 @@ centralNetworkServices:
         regions:
           - *HOME_REGION
         firewallPolicy:
-          statelessDefaultActions: ["aws:forward_to_sfe"]
-          statelessFragmentDefaultActions: ["aws:forward_to_sfe"]
+          statelessDefaultActions: ['aws:forward_to_sfe']
+          statelessFragmentDefaultActions: ['aws:forward_to_sfe']
           statefulRuleGroups:
             - name: accelerator-rule-group
             - name: domain-list-group
@@ -138,6 +195,25 @@ centralNetworkServices:
           organizationalUnits:
             - Infrastructure
     rules:
+      - name: accelerator-suricata-rule-group
+        regions:
+          - *HOME_REGION
+        capacity: 100
+        type: STATEFUL
+        ruleGroup:
+          rulesSource:
+            rulesFile: firewall-rules/rules.txt
+          ruleVariables:
+            ipSets:
+              name: HOME_NET
+              definition:
+                - 10.0.0.0/16
+                - 10.1.0.0/16
+            portSets:
+              name: HOME_NET
+              definition:
+                - '80'
+                - '443'
       - name: accelerator-rule-group
         regions:
           - *HOME_REGION
@@ -156,7 +232,7 @@ centralNetworkServices:
                   sourcePort: ANY
                 ruleOptions:
                   - keyword: sid
-                    settings: ["100"]
+                    settings: ['100']
               - action: DROP
                 header:
                   destination: ANY
@@ -167,11 +243,11 @@ centralNetworkServices:
                   sourcePort: ANY
                 ruleOptions:
                   - keyword: sid
-                    settings: ["101"]
+                    settings: ['101']
               - action: ALERT
                 header:
                   destination: 1.1.1.1/32
-                  destinationPort: "80"
+                  destinationPort: '80'
                   direction: FORWARD
                   protocol: TCP
                   source: ANY
@@ -180,7 +256,7 @@ centralNetworkServices:
                   - keyword: msg
                     settings: ['"example message"']
                   - keyword: sid
-                    settings: ["102"]
+                    settings: ['102']
       - name: domain-list-group
         regions:
           - *HOME_REGION
@@ -190,8 +266,8 @@ centralNetworkServices:
           rulesSource:
             rulesSourceList:
               generatedRulesType: DENYLIST
-              targets: [".example.com"]
-              targetTypes: ["TLS_SNI", "HTTP_HOST"]
+              targets: ['.example.com']
+              targetTypes: ['TLS_SNI', 'HTTP_HOST']
           ruleVariables:
             ipSets:
               name: HOME_NET
@@ -201,8 +277,8 @@ centralNetworkServices:
             portSets:
               name: HOME_NET
               definition:
-                - "80"
-                - "443"
+                - '80'
+                - '443'
   route53Resolver:
     endpoints:
       - name: accelerator-inbound
@@ -222,7 +298,7 @@ centralNetworkServices:
             domainName: example.com
             targetIps:
               - ip: 1.1.1.1
-                port: "5353" # only include if targeting a non-standard DNS port
+                port: '5353' # only include if targeting a non-standard DNS port
               - ip: 2.2.2.2
             shareTargets:
               organizationalUnits:
@@ -269,7 +345,7 @@ prefixLists:
       - Network
     regions:
       - *HOME_REGION
-    addressFamily: "IPv4"
+    addressFamily: 'IPv4'
     maxEntries: 1
     entries:
       - 10.1.0.1/32
@@ -322,6 +398,10 @@ vpcs:
             destinationPrefixList: accelerator-prefix-list
             type: transitGateway
             target: Network-Main
+          - name: VpcPeer
+            destination: 10.4.0.0/16
+            type: vpcPeering
+            target: CrossAccount
       - name: Network-Endpoints-B
         routes:
           - name: TgwRoute
@@ -338,6 +418,10 @@ vpcs:
             destinationPrefixList: accelerator-prefix-list
             type: transitGateway
             target: Network-Main
+          - name: VpcPeer
+            destination: 10.4.0.0/16
+            type: vpcPeering
+            target: CrossAccount
     subnets:
       - name: Network-Endpoints-A
         availabilityZone: a
@@ -382,6 +466,8 @@ vpcs:
         subnets:
           - Network-EndpointsTgwAttach-A
           - Network-EndpointsTgwAttach-B
+    virtualPrivateGateway:
+      asn: 65200
     gatewayEndpoints:
       defaultPolicy: Default
       endpoints:
@@ -456,26 +542,26 @@ vpcs:
         # - service: synthetics
         # - service: transfer.server
     securityGroups:
-      - name: "Management"
-        description: "Management Security Group"
+      - name: 'Management'
+        description: 'Management Security Group'
         inboundRules:
-          - description: "Management RDP Traffic Inbound"
+          - description: 'Management RDP Traffic Inbound'
             types:
               - RDP
             sources:
-              - "10.0.0.0/8"
-              - "100.96.252.0/23"
-              - "100.96.250.0/23"
-              - account: "Network"
-                vpc: "Network-Endpoints"
+              - '10.0.0.0/8'
+              - '100.96.252.0/23'
+              - '100.96.250.0/23'
+              - account: 'Network'
+                vpc: 'Network-Endpoints'
                 subnets:
-                  - "Network-EndpointsTgwAttach-A"
-                  - "Network-EndpointsTgwAttach-B"
+                  - 'Network-EndpointsTgwAttach-A'
+                  - 'Network-EndpointsTgwAttach-B'
               - securityGroups:
                   - Management
               - prefixLists:
                   - accelerator-prefix-list
-          - description: "Management SSH Traffic Inbound"
+          - description: 'Management SSH Traffic Inbound'
             types: []
             tcpPorts:
               - 22
@@ -495,7 +581,7 @@ vpcs:
               - prefixLists:
                   - accelerator-prefix-list
         outboundRules:
-          - description: "All Outbound"
+          - description: 'All Outbound'
             types:
               - ALL
             sources:
@@ -511,7 +597,7 @@ vpcs:
                   - Management
               - prefixLists:
                   - accelerator-prefix-list
-          - description: "All Outbound"
+          - description: 'All Outbound'
             types: []
             tcpPorts:
               - 22
@@ -590,6 +676,56 @@ vpcs:
         - pkt-dst-aws-service
         - flow-direction
         - traffic-path
+    loadBalancers:
+      applicationLoadBalancers:
+        - name: appA-alb-01
+          scheme: internet-facing
+          subnets:
+            - 'Network-EndpointsTgwAttach-A'
+            - 'Network-EndpointsTgwAttach-B'
+          securityGroups:
+            - Management
+          listeners:
+            - name: appA-listener-2
+              port: 80
+              protocol: HTTP
+              targetGroup: appA-alb-tg-1
+              type: forward
+      networkLoadBalancers:
+        - name: appA-nlb-01
+          scheme: internet-facing
+          deletionProtection: false
+          subnets:
+            - 'Network-EndpointsTgwAttach-A'
+            - 'Network-EndpointsTgwAttach-B'
+          listeners:
+            - name: appA-listener-1
+              port: 80
+              protocol: TCP
+              targetGroup: appA-nlb-tg-1
+    targetGroups:
+      - name: appA-nlb-tg-1
+        port: 80
+        protocol: TCP
+        type: instance
+        connectionTermination: true
+        preserveClientIp: true
+        proxyProtocolV2: true
+        healthCheck:
+          enabled: true
+          port: 80
+          protocol: TCP
+      - name: appA-alb-tg-1
+        port: 80
+        protocol: HTTP
+        type: instance
+        connectionTermination: true
+        preserveClientIp: true
+        proxyProtocolV2: true
+        healthCheck:
+          enabled: true
+          port: 80
+          protocol: HTTP
 
   - name: Network-Inspection
     account: Network
@@ -665,6 +801,21 @@ vpcs:
         availabilityZone: b
         routeTable: Network-Inspection-Tgw-B
         ipv4CidrBlock: 10.2.3.224/28
+    securityGroups:
+      - name: Data
+        description: Firewall data
+        inboundRules:
+          - description: GENEVE
+            sources:
+              - 10.2.0.0/22
+            udpPorts:
+              - 6081
+        outboundRules:
+          - description: All outbound
+            types:
+              - ALL
+            sources:
+              - 0.0.0.0/0
     transitGatewayAttachments:
       - name: Network-Inspection
         transitGateway:
@@ -681,6 +832,8 @@ vpcs:
         subnets:
           - Network-InspectionTgwAttach-A
           - Network-InspectionTgwAttach-B
+    virtualPrivateGateway:
+      asn: 65000
     gatewayEndpoints:
       defaultPolicy: Default
       endpoints:
@@ -709,6 +862,10 @@ vpcs:
           - name: DynamoDBGateway
             type: gatewayEndpoint
             target: dynamodb
+          - name: VpcPeer
+            destination: 10.0.0.0/24
+            type: vpcPeering
+            target: CrossAccount
       - name: SharedServices-App-B
         routes:
           - name: TgwRoute
@@ -721,6 +878,10 @@ vpcs:
           - name: DynamoDBGateway
             type: gatewayEndpoint
             target: dynamodb
+          - name: VpcPeer
+            destination: 10.0.0.0/24
+            type: vpcPeering
+            target: CrossAccount
     subnets:
       - name: SharedServices-App-A
         availabilityZone: a
@@ -757,7 +918,26 @@ vpcs:
       endpoints:
         - service: s3
         - service: dynamodb
+    virtualPrivateGateway:
+      asn: 65002
     useCentralEndpoints: true
+    securityGroups:
+      - name: SharedServices-Main-Rsyslog-sg
+        description: Security Group for AWS Accelerator rsyslog
+        inboundRules:
+          - description: allow inbound traffic
+            udpPorts:
+              - 514
+            tcpPorts:
+              - 514
+            sources:
+              - 10.0.0.0/8
+        outboundRules:
+          - description: All Outbound
+            type:
+              - ALL
+            sources:
+              - 0.0.0.0/0
     vpcFlowLogs:
       trafficType: ALL
       maxAggregationInterval: 60
@@ -765,10 +945,10 @@ vpcs:
         - s3
         - cloud-watch-logs
       destinationsConfig:
-          s3:
-            lifecycleRules: []
-          cloudWatchLogs:
-            retentionInDays: 3653
+        s3:
+          lifecycleRules: []
+        cloudWatchLogs:
+          retentionInDays: 3653
       defaultFormat: true
       customFields:
         - version
@@ -815,7 +995,7 @@ directConnectGateways:
         vlan: 575
         enableSiteLink: true
         jumboFrames: true
-    transitGatewayAssociations: 
+    transitGatewayAssociations:
       - name: Network-Main
         account: Network
         allowedPrefixes:
@@ -831,8 +1011,35 @@ vpcPeering:
     vpcs:
       - Network-Endpoints
       - Network-Inspection
+  - name: CrossAccount
+    vpcs:
+      - Network-Endpoints
+      - SharedServices-Main
 
+customerGateways:
+  - name: accelerator-cgw
+    account: Network
+    region: *HOME_REGION
+    ipAddress: 1.1.1.1
+    asn: 65500
+    vpnConnections:
+      - name: accelerator-vpn
+        transitGateway: Network-Main
+        staticRoutesOnly: false
+        routeTableAssociations:
+          - Network-Main-Core
+        routeTablePropagations:
+          - Network-Main-Core
+        tunnelSpecifications:
+          - tunnelInsideCidr: 169.254.200.0/30
+          - tunnelInsideCidr: 169.254.200.100/30
 
+      - name: VpcInspectionVpnConnection
+        vpc: Network-Inspection
+        staticRoutesOnly: false
+        tunnelSpecifications:
+          - tunnelInsideCidr: 169.254.100.0/30
+          - tunnelInsideCidr: 169.254.100.100/30
 
 vpcFlowLogs:
   trafficType: ALL
@@ -841,10 +1048,10 @@ vpcFlowLogs:
     - s3
     - cloud-watch-logs
   destinationsConfig:
-      s3:
-        lifecycleRules: []
-      cloudWatchLogs:
-        retentionInDays: 3653
+    s3:
+      lifecycleRules: []
+    cloudWatchLogs:
+      retentionInDays: 3653
   defaultFormat: true
   customFields:
     - version
@@ -874,3 +1081,24 @@ vpcFlowLogs:
     - pkt-dst-aws-service
     - flow-direction
     - traffic-path
+
+certificates:
+  - name: cert1
+    type: import
+    privKey: cert1/privKey.key
+    cert: cert1/cert.crt
+    deploymentTargets:
+      accounts:
+        - Management
+        - Audit
+  - name: cert2
+    type: request
+    validation: DNS
+    domain: example.com
+    san:
+      - www.example.com
+      - www.example.net
+      - e.co
+    deploymentTargets:
+      OU:
+        - Infrastructure

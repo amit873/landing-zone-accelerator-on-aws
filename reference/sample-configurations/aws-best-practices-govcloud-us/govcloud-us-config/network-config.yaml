@@ -19,14 +19,13 @@ transitGateways:
     # Adding transit gateway route tables
     routeTables:
       - name: Network-Main-Internal
-        routes: [ ]
+        routes: []
       - name: Network-Main-Network-Boundary
-        routes: [ ]
+        routes: []
       - name: Network-Main-SharedServices-Main
-        routes: [ ]
+        routes: []
       - name: Network-Main-SharedServices-External-Access
-        routes: [ ]
-
+        routes: []
 
 endpointPolicies: []
 vpcs:
@@ -318,8 +317,10 @@ vpcFlowLogs:
   trafficType: ALL
   maxAggregationInterval: 600
   destinations:
-    - s3
     - cloud-watch-logs
+  destinationsConfig:
+    cloudWatchLogs:
+      retentionInDays: 30
   defaultFormat: false
   customFields:
     - version

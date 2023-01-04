@@ -11,11 +11,13 @@
  *  and limitations under the License.
  */
 
-import { throttlingBackOff } from '@aws-accelerator/utils';
 import * as AWS from 'aws-sdk';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
 import * as path from 'path';
+
+import { throttlingBackOff } from '@aws-accelerator/utils';
+
 import * as t from './common-types';
 
 /**
@@ -24,6 +26,7 @@ import * as t from './common-types';
 export abstract class OrganizationConfigTypes {
   static readonly organizationalUnitConfig = t.interface({
     name: t.nonEmptyString,
+    ignore: t.optional(t.boolean),
   });
 
   static readonly organizationalUnitIdConfig = t.interface({
@@ -70,7 +73,17 @@ export abstract class OrganizationConfigTypes {
 }
 
 /**
+ * *{@link OrganizationConfig} / {@link OrganizationalUnitConfig}*
+ *
  * AWS Organizational Unit (OU) configuration
+ *
+ * @example
+ * ```
+ * organizationalUnits:
+ *   - name: Sandbox
+ *   - name: Suspended
+ *     ignore: true
+ * ```
  */
 export abstract class OrganizationalUnitConfig
   implements t.TypeOf<typeof OrganizationConfigTypes.organizationalUnitConfig>
@@ -88,10 +101,26 @@ export abstract class OrganizationalUnitConfig
    * - name: Sandbox/Development/Application1
    */
   readonly name: string = '';
+  /**
+   * Optional property used to ignore organizational unit and
+   * the associated accounts
+   * Default value is false
+   */
+  readonly ignore: boolean | undefined = undefined;
 }
 
 /**
- * Organizational unit in configuration
+ * *{@link OrganizationConfig} / {@link OrganizationalUnitIdConfig}
+ *
+ * Organizational unit id configuration
+ *
+ * @example
+ * ```
+ * organizationalUnitIds:
+ *   - name: Sandbox
+ *     id: o-abc123
+ *     arn: <ARN_of_OU>
+ * ```
  */
 export abstract class OrganizationalUnitIdConfig
   implements t.TypeOf<typeof OrganizationConfigTypes.organizationalUnitIdConfig>
@@ -111,7 +140,16 @@ export abstract class OrganizationalUnitIdConfig
 }
 
 /**
+ * *{@link OrganizationConfig} / {@link QuarantineNewAccountsConfig}*
+ *
  * Quarantine SCP application configuration
+ *
+ * @example
+ * ```
+ * quarantineNewAccounts:
+ *   enable: true
+ *   scpPolicyName: QuarantineAccounts
+ * ```
  */
 export abstract class QuarantineNewAccountsConfig
   implements t.TypeOf<typeof OrganizationConfigTypes.quarantineNewAccountsConfig>
@@ -131,7 +169,19 @@ export abstract class QuarantineNewAccountsConfig
 }
 
 /**
+ * *{@link OrganizationConfig} / {@link ServiceControlPolicyConfig}*
+ *
  * Service control policy configuration
+ *
+ * @example
+ * ```
+ * serviceControlPolicies:
+ *   - name: QuarantineAccounts
+ *     policy: path/to/policy.json
+ *     type: customerManaged
+ *     deploymentTargets:
+ *       organizationalUnits: []
+ * ```
  */
 export abstract class ServiceControlPolicyConfig
   implements t.TypeOf<typeof OrganizationConfigTypes.serviceControlPolicyConfig>
@@ -160,10 +210,23 @@ export abstract class ServiceControlPolicyConfig
 }
 
 /**
+ * *{@link OrganizationConfig} / {@link TaggingPolicyConfig}*
+ *
  * Organizations tag policy.
  *
  * Tag policies help you standardize tags on all tagged resources across your organization.
  * You can use tag policies to define tag keys (including how they should be capitalized) and their allowed values.
+ *
+ * @example
+ * ```
+ * taggingPolicies:
+ *   - name: TagPolicy
+ *     description: Organization Tagging Policy
+ *     policy: tagging-policies/org-tag-policy.json
+ *     deploymentTargets:
+ *         organizationalUnits:
+ *           - Root
+ * ```
  */
 export abstract class TaggingPolicyConfig implements t.TypeOf<typeof OrganizationConfigTypes.tagPolicyConfig> {
   /**
@@ -186,10 +249,23 @@ export abstract class TaggingPolicyConfig implements t.TypeOf<typeof Organizatio
 }
 
 /**
+ * *{@link OrganizationConfig} / {@link BackupPolicyConfig}*
+ *
  * Organization backup policy
  *
  * Backup policies enable you to deploy organization-wide backup plans to help ensure compliance across your organization's accounts.
  * Using policies helps ensure consistency in how you implement your backup plans
+ *
+ * @example
+ * ```
+ * backupPolicies:
+ *   - name: BackupPolicy
+ *     description: Organization Backup Policy
+ *     policy: backup-policies/org-backup-policies.json
+ *     deploymentTargets:
+ *         organizationalUnits:
+ *           - Root
+ * ```
  */
 export abstract class BackupPolicyConfig implements t.TypeOf<typeof OrganizationConfigTypes.backupPolicyConfig> {
   /**
@@ -247,9 +323,11 @@ export class OrganizationConfig implements t.TypeOf<typeof OrganizationConfigTyp
   readonly organizationalUnits: OrganizationalUnitConfig[] = [
     {
       name: 'Security',
+      ignore: undefined,
     },
     {
       name: 'Infrastructure',
+      ignore: undefined,
     },
   ];
 
@@ -372,10 +450,50 @@ export class OrganizationConfig implements t.TypeOf<typeof OrganizationConfigTyp
     values: t.TypeOf<typeof OrganizationConfigTypes.organizationConfig>,
     errors: string[],
   ) {
+    type validateScpItem = {
+      orgEntity: string;
+      orgEntityType: string;
+      appliedScpName: string[];
+    };
+    const validateScpCountForOrg: validateScpItem[] = [];
     for (const serviceControlPolicy of values.serviceControlPolicies ?? []) {
       if (!fs.existsSync(path.join(configDir, serviceControlPolicy.policy))) {
         errors.push(
           `Invalid policy file ${serviceControlPolicy.policy} for service control policy ${serviceControlPolicy.name} !!!`,
+        );
+      }
+
+      for (const orgUnitScp of serviceControlPolicy.deploymentTargets.organizationalUnits ?? []) {
+        //check in array to see if OU is already there
+        const index = validateScpCountForOrg.map(object => object.orgEntity).indexOf(orgUnitScp);
+        if (index > -1) {
+          validateScpCountForOrg[index].appliedScpName.push(serviceControlPolicy.name);
+        } else {
+          validateScpCountForOrg.push({
+            orgEntity: orgUnitScp,
+            orgEntityType: 'Organization Unit',
+            appliedScpName: [serviceControlPolicy.name],
+          });
+        }
+      }
+      for (const accUnitScp of serviceControlPolicy.deploymentTargets.accounts ?? []) {
+        //check in array to see if account is already there
+        const index = validateScpCountForOrg.map(object => object.orgEntity).indexOf(accUnitScp);
+        if (index > -1) {
+          validateScpCountForOrg[index].appliedScpName.push(serviceControlPolicy.name);
+        } else {
+          validateScpCountForOrg.push({
+            orgEntity: accUnitScp,
+            orgEntityType: 'Account',
+            appliedScpName: [serviceControlPolicy.name],
+          });
+        }
+      }
+    }
+    for (const validateOrgEntity of validateScpCountForOrg) {
+      if (validateOrgEntity.appliedScpName.length > 5) {
+        errors.push(
+          `${validateOrgEntity.orgEntityType} - ${validateOrgEntity.orgEntity} has ${validateOrgEntity.appliedScpName.length} out of 5 allowed scps`,
         );
       }
     }
@@ -531,6 +649,14 @@ export class OrganizationConfig implements t.TypeOf<typeof OrganizationConfigTyp
       }
     }
     throw new Error("Organizations not enabled or OU doesn't exist");
+  }
+
+  public isIgnored(name: string): boolean {
+    const ou = this.organizationalUnits?.find(item => item.name === name);
+    if (ou?.ignore) {
+      return true;
+    }
+    return false;
   }
 
   public getPath(name: string): string {

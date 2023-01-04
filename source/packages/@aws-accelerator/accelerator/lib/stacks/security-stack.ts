@@ -49,11 +49,11 @@ export class SecurityStack extends AcceleratorStack {
     this.logArchiveAccountId = props.accountsConfig.getLogArchiveAccountId();
     this.centralLogsBucketName = `${
       AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX
-    }-${this.props.accountsConfig.getLogArchiveAccountId()}-${this.props.globalConfig.homeRegion}`;
+    }-${this.props.accountsConfig.getLogArchiveAccountId()}-${this.props.centralizedLoggingRegion}`;
 
     this.centralLogsBucketKey = new KeyLookup(this, 'CentralLogsBucketKey', {
       accountId: props.accountsConfig.getLogArchiveAccountId(),
-      keyRegion: props.globalConfig.homeRegion,
+      keyRegion: props.centralizedLoggingRegion,
       roleName: CentralLogsBucket.CROSS_ACCOUNT_SSM_PARAMETER_ACCESS_ROLE_NAME,
       keyArnParameterName: CentralLogsBucket.KEY_ARN_PARAMETER_NAME,
       logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
@@ -92,6 +92,11 @@ export class SecurityStack extends AcceleratorStack {
     // Update IAM Password Policy
     //
     this.updateIamPasswordPolicy();
+
+    //
+    // Create SSM Parameters
+    //
+    this.createSsmParameters();
 
     Logger.info('[security-stack] Completed stack synthesis');
   }
@@ -135,6 +140,8 @@ export class SecurityStack extends AcceleratorStack {
           new GuardDutyPublishingDestination(this, 'GuardDutyPublishingDestination', {
             exportDestinationType:
               this.props.securityConfig.centralSecurityServices.guardduty.exportConfiguration.destinationType,
+            exportDestinationOverride:
+              this.props.securityConfig.centralSecurityServices.guardduty.exportConfiguration.overrideExisting ?? false,
             destinationArn: `arn:${cdk.Stack.of(this).partition}:s3:::${this.centralLogsBucketName}`,
             destinationKmsKey: this.centralLogsBucketKey,
             logKmsKey: this.cloudwatchKey,
@@ -228,6 +235,63 @@ export class SecurityStack extends AcceleratorStack {
             conditions: { Bool: { 'kms:GrantIsForAWSResource': 'true' } },
           }),
         );
+        ebsEncryptionKey.addToResourcePolicy(
+          new iam.PolicyStatement({
+            sid: 'Account Access',
+            effect: cdk.aws_iam.Effect.ALLOW,
+            principals: [new cdk.aws_iam.AccountPrincipal(cdk.Stack.of(this).account)],
+            actions: ['kms:*'],
+            resources: ['*'],
+          }),
+        );
+        ebsEncryptionKey.addToResourcePolicy(
+          new iam.PolicyStatement({
+            sid: 'ec2',
+            effect: cdk.aws_iam.Effect.ALLOW,
+            principals: [new cdk.aws_iam.AnyPrincipal()],
+            actions: ['kms:*'],
+            resources: ['*'],
+            conditions: {
+              StringEquals: {
+                'kms:CallerAccount': cdk.Stack.of(this).account,
+                'kms:ViaService': `ec2.${cdk.Stack.of(this).account}.${cdk.Aws.URL_SUFFIX}`,
+              },
+            },
+          }),
+        );
+        if (this.props.partition === 'aws') {
+          ebsEncryptionKey.addToResourcePolicy(
+            new iam.PolicyStatement({
+              sid: 'Allow cloud9 service-linked role use',
+              effect: cdk.aws_iam.Effect.ALLOW,
+              actions: ['kms:Decrypt', 'kms:DescribeKey', 'kms:Encrypt', 'kms:GenerateDataKey*', 'kms:ReEncrypt*'],
+              principals: [
+                new cdk.aws_iam.ArnPrincipal(
+                  `arn:${cdk.Stack.of(this).partition}:iam::${
+                    cdk.Stack.of(this).account
+                  }:role/aws-service-role/cloud9.amazonaws.com/AWSServiceRoleForAWSCloud9`,
+                ),
+              ],
+              resources: ['*'],
+            }),
+          );
+          ebsEncryptionKey.addToResourcePolicy(
+            new iam.PolicyStatement({
+              sid: 'Allow cloud9 attachment of persistent resources',
+              effect: cdk.aws_iam.Effect.ALLOW,
+              actions: ['kms:CreateGrant', 'kms:ListGrants', 'kms:RevokeGrant'],
+              principals: [
+                new cdk.aws_iam.ArnPrincipal(
+                  `arn:${cdk.Stack.of(this).partition}:iam::${
+                    cdk.Stack.of(this).account
+                  }:role/aws-service-role/cloud9.amazonaws.com/AWSServiceRoleForAWSCloud9`,
+                ),
+              ],
+              resources: ['*'],
+              conditions: { Bool: { 'kms:GrantIsForAWSResource': 'true' } },
+            }),
+          );
+        }
       }
       new EbsDefaultEncryption(this, 'EbsDefaultVolumeEncryption', {
         ebsEncryptionKmsKey: ebsEncryptionKey,
@@ -235,7 +299,8 @@ export class SecurityStack extends AcceleratorStack {
         logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
       });
 
-      new cdk.aws_ssm.StringParameter(this, 'EbsDefaultVolumeEncryptionParameter', {
+      this.ssmParameters.push({
+        logicalId: 'EbsDefaultVolumeEncryptionParameter',
         parameterName: `/accelerator/security-stack/ebsDefaultVolumeEncryptionKeyArn`,
         stringValue: ebsEncryptionKey.keyArn,
       });

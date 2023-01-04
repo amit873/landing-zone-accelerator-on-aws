@@ -21,10 +21,14 @@ import { ToolkitInfo } from 'aws-cdk/lib/api/toolkit-info';
 import { CdkToolkit } from 'aws-cdk/lib/cdk-toolkit';
 import { RequireApproval } from 'aws-cdk/lib/diff';
 import { Command, Configuration } from 'aws-cdk/lib/settings';
+import * as fs from 'fs';
+import * as path from 'path';
 
 import { AcceleratorStackNames } from './accelerator';
 import { AcceleratorStage } from './accelerator-stage';
+import { AccountsConfig, CustomizationsConfig, OrganizationConfig } from '@aws-accelerator/config';
 import { Logger } from './logger';
+import { isIncluded } from './stacks/custom-stack';
 
 /**
  *
@@ -230,15 +234,55 @@ export class AcceleratorToolkit {
           ];
         }
 
+        if (options.stage === AcceleratorStage.CUSTOMIZATIONS) {
+          if (options.configDirPath === undefined) {
+            throw new Error('Customizations stage requires an argument for configuration directory path');
+          }
+          if (fs.existsSync(path.join(options.configDirPath, 'customizations-config.yaml'))) {
+            const customizationsConfig = CustomizationsConfig.load(options.configDirPath);
+            const accountsConfig = AccountsConfig.load(options.configDirPath);
+            await accountsConfig.loadAccountIds(options.partition);
+            const customStacks = customizationsConfig.getCustomStacks();
+            for (const stack of customStacks) {
+              const deploymentAccts = accountsConfig.getAccountIdsFromDeploymentTarget(stack.deploymentTargets);
+              const deploymentRegions = stack.regions.map(a => a.toString());
+              if (deploymentRegions.includes(options.region!) && deploymentAccts.includes(options.accountId!)) {
+                stackName.push(`${stack.name}-${options.accountId}-${options.region}`);
+              }
+            }
+            const appStacks = customizationsConfig.getAppStacks();
+            const organizationConfig = OrganizationConfig.load(options.configDirPath);
+            for (const application of appStacks) {
+              if (
+                isIncluded(
+                  application.deploymentTargets,
+                  options.region!,
+                  options.accountId!,
+                  accountsConfig,
+                  organizationConfig,
+                )
+              ) {
+                const applicationStackName = `AWSAccelerator-App-${
+                  application.name
+                }-${options.accountId!}-${options.region!}`;
+                stackName.push(applicationStackName);
+              }
+            }
+          }
+        }
+
         const selector: StackSelector = {
           // patterns: [`${AcceleratorStackNames[options.stage]}-${options.accountId}-${options.region}`],
           patterns: stackName,
         };
 
+        const changeSetName = `${stackName[0]}-change-set`;
+
         await cli.deploy({
           selector,
           toolkitStackName,
           requireApproval: options.requireApproval,
+          changeSetName: changeSetName,
         });
         break;
       case Command.SYNTHESIZE:

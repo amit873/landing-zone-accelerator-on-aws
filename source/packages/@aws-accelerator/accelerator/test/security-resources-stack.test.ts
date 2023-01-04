@@ -21,9 +21,26 @@ const testNamePrefix = 'Construct(SecurityResourcesStack): ';
 /**
  * SecurityResourcesStack
  */
-const acceleratorTestStacks = new AcceleratorSynthStacks(AcceleratorStage.SECURITY_RESOURCES, 'all-enabled', 'aws');
+const acceleratorTestStacks = new AcceleratorSynthStacks(
+  AcceleratorStage.SECURITY_RESOURCES,
+  'all-enabled',
+  'aws',
+  'us-east-1',
+);
 const stack = acceleratorTestStacks.stacks.get(`Management-us-east-1`)!;
 
 describe('SecurityResourcesStack', () => {
   snapShotTest(testNamePrefix, stack);
+});
+
+const delegatedAdminTestStacks = new AcceleratorSynthStacks(
+  AcceleratorStage.SECURITY_RESOURCES,
+  'all-enabled-delegated-admin',
+  'aws',
+  'us-east-1',
+);
+const delegatedAdminStack = delegatedAdminTestStacks.stacks.get(`Management-us-east-1`)!;
+
+describe('delegatedAdminStack', () => {
+  snapShotTest(testNamePrefix, delegatedAdminStack);
 });

@@ -41,6 +41,7 @@ export interface AcceleratorPipelineProps {
   readonly managementAccountEmail: string;
   readonly logArchiveAccountEmail: string;
   readonly auditAccountEmail: string;
+  readonly controlTowerEnabled: string;
   /**
    * List of email addresses to be notified when pipeline is waiting for manual approval stage.
    * If pipeline do not have approval stage enabled, this value will have no impact.
@@ -127,6 +128,7 @@ export class AcceleratorPipeline extends Construct {
       managementAccountEmail: this.props.managementAccountEmail,
       logArchiveAccountEmail: this.props.logArchiveAccountEmail,
       auditAccountEmail: this.props.auditAccountEmail,
+      controlTowerEnabled: this.props.controlTowerEnabled,
     });
 
     /**
@@ -207,6 +209,10 @@ export class AcceleratorPipeline extends Construct {
             commands: [
               'env',
               'cd source',
+              `if [ "${cdk.Stack.of(this).partition}" = "aws-cn" ]; then
+                  sed -i "s#registry.yarnpkg.com#registry.npmmirror.com#g" yarn.lock;
+                  yarn config set registry https://registry.npmmirror.com
+               fi`,
               'yarn install',
               'yarn lerna link',
               'yarn build',
@@ -415,10 +421,16 @@ export class AcceleratorPipeline extends Construct {
           runOrder: 3,
         }),
         this.createToolkitStage({
+          actionName: 'Customizations',
+          command: 'deploy',
+          stage: AcceleratorStage.CUSTOMIZATIONS,
+          runOrder: 4,
+        }),
+        this.createToolkitStage({
           actionName: 'Finalize',
           command: 'deploy',
           stage: AcceleratorStage.FINALIZE,
-          runOrder: 4,
+          runOrder: 5,
         }),
       ],
     });
@@ -432,15 +444,11 @@ export class AcceleratorPipeline extends Construct {
    */
   private addReviewStage() {
     if (this.props.enableApprovalStage) {
-      let notificationTopic: cdk.aws_sns.Topic | undefined;
-
-      if (this.props.partition === 'aws') {
-        notificationTopic = new cdk.aws_sns.Topic(this, 'ManualApprovalActionTopic', {
-          topicName: (this.props.qualifier ? this.props.qualifier : 'aws-accelerator') + '-pipeline-review-topic',
-          displayName: (this.props.qualifier ? this.props.qualifier : 'aws-accelerator') + '-pipeline-review-topic',
-          masterKey: this.installerKey,
-        });
-      }
+      const notificationTopic = new cdk.aws_sns.Topic(this, 'ManualApprovalActionTopic', {
+        topicName: (this.props.qualifier ? this.props.qualifier : 'aws-accelerator') + '-pipeline-review-topic',
+        displayName: (this.props.qualifier ? this.props.qualifier : 'aws-accelerator') + '-pipeline-review-topic',
+        masterKey: this.installerKey,
+      });
 
       let notifyEmails: string[] | undefined = undefined;
 

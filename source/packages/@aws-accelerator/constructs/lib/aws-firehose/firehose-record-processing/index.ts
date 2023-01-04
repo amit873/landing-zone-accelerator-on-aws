@@ -12,6 +12,8 @@
  */
 
 import * as AWS from 'aws-sdk';
+import * as fs from 'fs';
+import * as path from 'path';
 const zlib = require('zlib');
 
 AWS.config.logger = console;
@@ -25,7 +27,8 @@ AWS.config.logger = console;
 
 export async function handler(event: AWSLambda.FirehoseTransformationEvent) {
   // Retrieve operating region that stack is ran
-  console.log(`Processing firehose records...`);
+  console.log(event);
+  // console.log(`Processing firehose records...`);
 
   const firehoseRecordsOutput: AWSLambda.FirehoseTransformationResult = { records: [] };
 
@@ -64,13 +67,16 @@ async function processFirehoseInputRecord(firehoseRecord: AWSLambda.FirehoseTran
     const firehoseTimestamp = new Date(firehoseRecord.approximateArrivalTimestamp);
     const prefixes = await getDatePrefix(serviceName, firehoseTimestamp);
 
+    // transform data to flatten json schema
+    const transformedData = await getTransformedData(jsonParsedPayload);
+
     // these are mandatory prefixes for firehose payload
     const partitionKeys = {
       dynamicPrefix: prefixes,
     };
     const firehoseReturnResult: AWSLambda.FirehoseTransformationResultRecord = {
       recordId: firehoseRecord.recordId,
-      data: firehoseRecord.data,
+      data: transformedData,
       result: 'Ok',
     };
 
@@ -119,9 +125,10 @@ async function checkDynamicPartition(firehoseRecordDynamicPartition: CloudWatchL
   let mappings: S3LogPartitionType[] | undefined;
 
   const dynamicPartitionMapping = process.env['DynamicS3LogPartitioningMapping']!;
+
   // if there is a mapping proceed to create a mapping
-  if (dynamicPartitionMapping && dynamicPartitionMapping.length > 0) {
-    mappings = JSON.parse(dynamicPartitionMapping);
+  if (dynamicPartitionMapping) {
+    mappings = JSON.parse(fs.readFileSync(path.join(__dirname, dynamicPartitionMapping), 'utf-8'));
   }
 
   let serviceName = null;
@@ -152,4 +159,38 @@ async function getDatePrefix(serviceName: string | null, inputTimestamp: Date) {
   calculatedPrefix += `/`;
 
   return calculatedPrefix;
+}
+
+type singleRowItem = {
+  messageType: string;
+  owner: string;
+  logGroup: string;
+  logStream: string;
+  subscriptionFilters: [string];
+  logEvents: [
+    {
+      id: string;
+      timestamp: bigint;
+      message: string;
+    },
+  ];
+};
+
+async function getTransformedData(jsonParsedPayload: singleRowItem) {
+  const jsonFormattedPayload = [];
+  for (const logEvent of jsonParsedPayload.logEvents) {
+    const singleRow = {
+      // making keys lower case for json serializer in firehose
+      messagetype: jsonParsedPayload.messageType,
+      owner: jsonParsedPayload.owner,
+      loggroup: jsonParsedPayload.logGroup,
+      subscriptionfilters: jsonParsedPayload.subscriptionFilters.join(','),
+      logeventsid: logEvent.id,
+      logeventstimestamp: logEvent.timestamp,
+      logeventsmessage: logEvent.message,
+    };
+    jsonFormattedPayload.push(JSON.stringify(singleRow));
+  }
+  const encodePayload = Buffer.from(jsonFormattedPayload.join('\n')).toString('base64');
+  return encodePayload;
 }

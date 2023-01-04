@@ -28,6 +28,7 @@ import {
   EnableAwsServiceAccess,
   EnablePolicyType,
   EnableSharingWithAwsOrganization,
+  FMSOrganizationAdminAccount,
   GuardDutyOrganizationAdminAccount,
   IpamOrganizationAdminAccount,
   KeyLookup,
@@ -39,6 +40,7 @@ import {
   RegisterDelegatedAdministrator,
   ReportDefinition,
   SecurityHubOrganizationAdminAccount,
+  IdentityCenterOrganizationAdminAccount,
 } from '@aws-accelerator/constructs';
 import * as cdk_extensions from '@aws-cdk-extensions/cdk-extensions';
 
@@ -56,12 +58,17 @@ export interface OrganizationsStackProps extends AcceleratorStackProps {
 export class OrganizationsStack extends AcceleratorStack {
   private cloudwatchKey: cdk.aws_kms.Key;
   private centralLogsBucketKey: cdk.aws_kms.Key;
-  private centralLogBucketReplicationProps: BucketReplicationProps;
+  private bucketReplicationProps: BucketReplicationProps;
   private logRetention: number;
   private stackProperties: AcceleratorStackProps;
 
   constructor(scope: Construct, id: string, props: OrganizationsStackProps) {
     super(scope, id, props);
+
+    // Security Services delegated admin account configuration
+    // Global decoration for security services
+    const delegatedAdminAccount = props.securityConfig.centralSecurityServices.delegatedAdminAccount;
+    const securityAdminAccountId = props.accountsConfig.getAccountId(delegatedAdminAccount);
 
     Logger.debug(`[organizations-stack] homeRegion: ${props.globalConfig.homeRegion}`);
     // Set private properties
@@ -79,19 +86,17 @@ export class OrganizationsStack extends AcceleratorStack {
 
     this.centralLogsBucketKey = new KeyLookup(this, 'CentralLogsBucketKey', {
       accountId: this.stackProperties.accountsConfig.getLogArchiveAccountId(),
-      keyRegion: this.stackProperties.globalConfig.homeRegion,
+      keyRegion: props.centralizedLoggingRegion,
       roleName: CentralLogsBucket.CROSS_ACCOUNT_SSM_PARAMETER_ACCESS_ROLE_NAME,
       keyArnParameterName: CentralLogsBucket.KEY_ARN_PARAMETER_NAME,
       logRetentionInDays: this.stackProperties.globalConfig.cloudwatchLogRetentionInDays,
     }).getKey();
 
-    this.centralLogBucketReplicationProps = {
+    this.bucketReplicationProps = {
       destination: {
         bucketName: `${
           AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX
-        }-${this.stackProperties.accountsConfig.getLogArchiveAccountId()}-${
-          this.stackProperties.globalConfig.homeRegion
-        }`,
+        }-${this.stackProperties.accountsConfig.getLogArchiveAccountId()}-${this.props.centralizedLoggingRegion}`,
         accountId: this.stackProperties.accountsConfig.getLogArchiveAccountId(),
         keyArn: this.centralLogsBucketKey.keyArn,
       },
@@ -132,12 +137,15 @@ export class OrganizationsStack extends AcceleratorStack {
       // Enable IPAM delegated administrator
       //
       this.enableIpamDelegatedAdminAccount();
-    }
 
-    // Security Services delegated admin account configuration
-    // Global decoration for security services
-    const delegatedAdminAccount = props.securityConfig.centralSecurityServices.delegatedAdminAccount;
-    const securityAdminAccountId = props.accountsConfig.getAccountId(delegatedAdminAccount);
+      //
+      // Enable FMS Delegated Admin Account
+      //
+      this.enableFMSDelegatedAdminAccount();
+
+      //IdentityCenter Config
+      this.enableIdentityCenterDelegatedAdminAccount(securityAdminAccountId);
+    }
 
     // Macie Configuration
     this.enableMacieDelegatedAdminAccount(securityAdminAccountId);
@@ -180,20 +188,22 @@ export class OrganizationsStack extends AcceleratorStack {
       });
 
       for (const backupPolicies of this.stackProperties.organizationConfig.backupPolicies ?? []) {
+        const policy = new Policy(this, backupPolicies.name, {
+          description: backupPolicies.description,
+          name: backupPolicies.name,
+          partition: this.props.partition,
+          path: this.generatePolicyReplacements(
+            path.join(this.stackProperties.configDirPath, backupPolicies.policy),
+            true,
+          ),
+          type: PolicyType.BACKUP_POLICY,
+          kmsKey: this.cloudwatchKey,
+          logRetentionInDays: this.logRetention,
+        });
+
+        policy.node.addDependency(enablePolicyTypeBackup);
+
         for (const orgUnit of backupPolicies.deploymentTargets.organizationalUnits) {
-          const policy = new Policy(this, backupPolicies.name, {
-            description: backupPolicies.description,
-            name: backupPolicies.name,
-            path: path.join(this.stackProperties.configDirPath, backupPolicies.policy),
-            type: PolicyType.BACKUP_POLICY,
-            kmsKey: this.cloudwatchKey,
-            logRetentionInDays: this.logRetention,
-            acceleratorPrefix: 'AWSAccelerator',
-            managementAccountAccessRole: this.stackProperties.globalConfig.managementAccountAccessRole,
-          });
-
-          policy.node.addDependency(enablePolicyTypeBackup);
-
           new PolicyAttachment(this, pascalCase(`Attach_${backupPolicies.name}_${orgUnit}`), {
             policyId: policy.id,
             targetId: this.stackProperties.organizationConfig.getOrganizationalUnitId(orgUnit),
@@ -222,7 +232,7 @@ export class OrganizationsStack extends AcceleratorStack {
         s3LifeCycleRules: this.getS3LifeCycleRules(
           this.stackProperties.globalConfig.reports.costAndUsageReport.lifecycleRules,
         ),
-        replicationProps: this.centralLogBucketReplicationProps,
+        replicationProps: this.bucketReplicationProps,
       });
 
       // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
@@ -232,9 +242,7 @@ export class OrganizationsStack extends AcceleratorStack {
           pascalCase(
             `${
               AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX
-            }-${this.stackProperties.accountsConfig.getLogArchiveAccountId()}-${
-              this.stackProperties.globalConfig.homeRegion
-            }`,
+            }-${this.stackProperties.accountsConfig.getLogArchiveAccountId()}-${this.props.centralizedLoggingRegion}`,
           ) +
           '-ReplicationRole/DefaultPolicy/Resource',
         [
@@ -326,6 +334,23 @@ export class OrganizationsStack extends AcceleratorStack {
           logRetentionInDays: this.logRetention,
         });
       }
+    }
+  }
+
+  /**
+   * Function to enable FMS delegated admin account
+   */
+  private enableFMSDelegatedAdminAccount() {
+    const fmsConfig = this.stackProperties.networkConfig.firewallManagerService;
+    if (fmsConfig && cdk.Stack.of(this).region === this.stackProperties.globalConfig.homeRegion) {
+      const adminAccountName = fmsConfig.delegatedAdminAccount;
+      const adminAccountId = this.stackProperties.accountsConfig.getAccountId(adminAccountName);
+      new FMSOrganizationAdminAccount(this, 'FMSOrganizationAdminAccount', {
+        adminAccountId,
+        kmsKey: this.cloudwatchKey,
+        logRetentionInDays: this.logRetention,
+        assumeRole: this.stackProperties.globalConfig.managementAccountAccessRole,
+      });
     }
   }
 
@@ -514,20 +539,20 @@ export class OrganizationsStack extends AcceleratorStack {
         logRetentionInDays: this.logRetention,
       });
       for (const taggingPolicy of this.stackProperties.organizationConfig.taggingPolicies ?? []) {
-        for (const orgUnit of taggingPolicy.deploymentTargets.organizationalUnits) {
-          const policy = new Policy(this, taggingPolicy.name, {
-            description: taggingPolicy.description,
-            name: taggingPolicy.name,
-            path: path.join(this.stackProperties.configDirPath, taggingPolicy.policy),
-            type: PolicyType.TAG_POLICY,
-            kmsKey: this.cloudwatchKey,
-            logRetentionInDays: this.logRetention,
-            acceleratorPrefix: 'AWSAccelerator',
-            managementAccountAccessRole: this.stackProperties.globalConfig.managementAccountAccessRole,
-          });
-
-          policy.node.addDependency(enablePolicyTypeTag);
-
+        const policy = new Policy(this, `${taggingPolicy.name}`, {
+          description: taggingPolicy.description,
+          name: `${taggingPolicy.name}`,
+          partition: this.props.partition,
+          path: this.generatePolicyReplacements(
+            path.join(this.stackProperties.configDirPath, taggingPolicy.policy),
+            true,
+          ),
+          type: PolicyType.TAG_POLICY,
+          kmsKey: this.cloudwatchKey,
+          logRetentionInDays: this.logRetention,
+        });
+        policy.node.addDependency(enablePolicyTypeTag);
+        for (const orgUnit of taggingPolicy.deploymentTargets.organizationalUnits ?? []) {
           new PolicyAttachment(this, pascalCase(`Attach_${taggingPolicy.name}_${orgUnit}`), {
             policyId: policy.id,
             targetId: this.stackProperties.organizationConfig.getOrganizationalUnitId(orgUnit),
@@ -537,6 +562,24 @@ export class OrganizationsStack extends AcceleratorStack {
           });
         }
       }
+    }
+  }
+
+  /**
+   * Custom resource to check if Identity Center Delegated Administrator
+   * needs to be updated.
+   * @param adminAccountId
+   */
+  private enableIdentityCenterDelegatedAdminAccount(adminAccountId: string) {
+    const managementAccountId = this.props.accountsConfig.getManagementAccountId();
+    if (
+      cdk.Stack.of(this).account === managementAccountId &&
+      (this.props.partition === 'aws' || this.props.partition === 'aws-us-gov')
+    ) {
+      new IdentityCenterOrganizationAdminAccount(this, `IdentityCenterAdmin`, {
+        adminAccountId: adminAccountId,
+      });
+      Logger.info(`[organizations-stack] Delegated Admin account for Identity Center is: ${adminAccountId}`);
     }
   }
 

@@ -14,7 +14,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 
-import { IpamAllocationConfig, OutpostsConfig } from '@aws-accelerator/config';
+import { IpamAllocationConfig, OutpostsConfig, VirtualPrivateGatewayConfig } from '@aws-accelerator/config';
 
 import { IpamSubnet } from './ipam-subnet';
 import { IPrefixList } from './prefix-list';
@@ -202,7 +202,6 @@ export class NatGateway extends cdk.Resource implements INatGateway {
     this.natGatewayId = resource.ref;
   }
 }
-
 export interface ISecurityGroup extends cdk.IResource {
   /**
    * ID for the current security group
@@ -484,19 +483,25 @@ export interface VpcProps {
   readonly ipv4IpamPoolId?: string;
   readonly ipv4NetmaskLength?: number;
   readonly tags?: cdk.CfnTag[];
+  readonly virtualPrivateGateway?: VirtualPrivateGatewayConfig;
 }
 
 /**
  * Defines a  VPC object
  */
 export class Vpc extends cdk.Resource implements IVpc {
+  public readonly name: string;
   public readonly vpcId: string;
+  public readonly cidrs: cdk.aws_ec2.CfnVPCCidrBlock[];
   public readonly internetGateway: cdk.aws_ec2.CfnInternetGateway | undefined;
   public readonly internetGatewayAttachment: cdk.aws_ec2.CfnVPCGatewayAttachment | undefined;
   public readonly dhcpOptionsAssociation: cdk.aws_ec2.CfnVPCDHCPOptionsAssociation | undefined;
+  public readonly virtualPrivateGateway: cdk.aws_ec2.VpnGateway | undefined;
+  public readonly virtualPrivateGatewayAttachment: cdk.aws_ec2.CfnVPCGatewayAttachment | undefined;
 
   constructor(scope: Construct, id: string, props: VpcProps) {
     super(scope, id);
+    this.name = props.name;
 
     const resource = new cdk.aws_ec2.CfnVPC(this, 'Resource', {
       cidrBlock: props.ipv4CidrBlock,
@@ -510,6 +515,7 @@ export class Vpc extends cdk.Resource implements IVpc {
     cdk.Tags.of(this).add('Name', props.name);
 
     this.vpcId = resource.ref;
+    this.cidrs = [];
 
     if (props.internetGateway) {
       this.internetGateway = new cdk.aws_ec2.CfnInternetGateway(this, 'InternetGateway', {});
@@ -518,6 +524,22 @@ export class Vpc extends cdk.Resource implements IVpc {
         internetGatewayId: this.internetGateway.ref,
         vpcId: this.vpcId,
       });
+    }
+
+    if (props.virtualPrivateGateway) {
+      this.virtualPrivateGateway = new cdk.aws_ec2.VpnGateway(this, `VirtualPrivateGateway`, {
+        amazonSideAsn: props.virtualPrivateGateway.asn,
+        type: 'ipsec.1',
+      });
+
+      this.virtualPrivateGatewayAttachment = new cdk.aws_ec2.CfnVPCGatewayAttachment(
+        this,
+        `VirtualPrivateGatewayAttachment`,
+        {
+          vpnGatewayId: this.virtualPrivateGateway.gatewayId,
+          vpcId: this.vpcId,
+        },
+      );
     }
 
     if (props.dhcpOptions) {
@@ -613,16 +635,26 @@ export class Vpc extends cdk.Resource implements IVpc {
     ipv6NetmaskLength?: number;
     ipv6Pool?: string;
   }) {
+    // This block is required for backwards compatibility
+    // with a previous iteration. It appends a number to the
+    // logical ID so more than two VPC CIDRs can be defined.
+    let logicalId = 'VpcCidrBlock';
+    if (this.cidrs.length > 0) {
+      logicalId = `VpcCidrBlock${this.cidrs.length}`;
+    }
+
     // Create a secondary VPC CIDR
-    new cdk.aws_ec2.CfnVPCCidrBlock(this, 'VpcCidrBlock', {
-      amazonProvidedIpv6CidrBlock: options.amazonProvidedIpv6CidrBlock,
-      cidrBlock: options.cidrBlock,
-      ipv4IpamPoolId: options.ipv4IpamPoolId,
-      ipv4NetmaskLength: options.ipv4NetmaskLength,
-      ipv6CidrBlock: options.ipv6CidrBlock,
-      ipv6IpamPoolId: options.ipv6IpamPoolId,
-      ipv6Pool: options.ipv6Pool,
-      vpcId: this.vpcId,
-    });
+    this.cidrs.push(
+      new cdk.aws_ec2.CfnVPCCidrBlock(this, logicalId, {
+        amazonProvidedIpv6CidrBlock: options.amazonProvidedIpv6CidrBlock,
+        cidrBlock: options.cidrBlock,
+        ipv4IpamPoolId: options.ipv4IpamPoolId,
+        ipv4NetmaskLength: options.ipv4NetmaskLength,
+        ipv6CidrBlock: options.ipv6CidrBlock,
+        ipv6IpamPoolId: options.ipv6IpamPoolId,
+        ipv6Pool: options.ipv6Pool,
+        vpcId: this.vpcId,
+      }),
+    );
   }
 }

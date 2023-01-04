@@ -13,16 +13,20 @@
 import {
   AccountsConfig,
   GlobalConfig,
-  IamConfig,
-  NetworkConfig,
   OrganizationConfig,
   SecurityConfig,
+  CustomizationsConfigValidator,
+  NetworkConfigValidator,
+  IamConfigValidator,
 } from '@aws-accelerator/config';
 import { Logger } from './logger';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const configDirPath = process.argv[2];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const errors: { file: string; message: any }[] = [];
+
 if (configDirPath) {
   Logger.info(`[config-validator] Config source directory -  ${configDirPath}`);
 
@@ -39,13 +43,13 @@ if (configDirPath) {
   }
 
   try {
-    IamConfig.load(configDirPath, true);
+    new IamConfigValidator(configDirPath);
   } catch (e) {
     errors.push({ file: 'iam-config.yaml', message: e });
   }
 
   try {
-    NetworkConfig.load(configDirPath, true);
+    new NetworkConfigValidator(configDirPath);
   } catch (e) {
     errors.push({ file: 'network-config.yaml', message: e });
   }
@@ -60,6 +64,15 @@ if (configDirPath) {
     SecurityConfig.load(configDirPath, true);
   } catch (e) {
     errors.push({ file: 'security-config.yaml', message: e });
+  }
+
+  // Validate optional configuration files if they exist
+  if (fs.existsSync(path.join(configDirPath, 'customizations-config.yaml'))) {
+    try {
+      new CustomizationsConfigValidator(configDirPath);
+    } catch (e) {
+      errors.push({ file: 'customizations-config.yaml', message: e });
+    }
   }
 
   if (errors.length > 0) {

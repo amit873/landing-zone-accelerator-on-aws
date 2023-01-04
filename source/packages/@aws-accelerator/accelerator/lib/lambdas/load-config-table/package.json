@@ -43,7 +43,6 @@
   "dependencies": {
     "@aws-accelerator/utils": "^0.0.0",
     "@aws-accelerator/config": "^0.0.0",
-    "t": "file:../../../../config/lib/common-types",
     "@aws-sdk/client-dynamodb": "3.92.0",
     "@aws-sdk/lib-dynamodb": "3.92.0",
     "@aws-sdk/client-cloudformation": "3.92.0",

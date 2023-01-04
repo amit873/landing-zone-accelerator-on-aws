@@ -22,9 +22,9 @@ import * as AWS from 'aws-sdk';
 
 import { throttlingBackOff } from '@aws-accelerator/utils';
 
-const ec2 = new AWS.EC2();
 export async function handler(event: AWSLambda.CloudFormationCustomResourceEvent): Promise<
   | {
+      PhysicalResourceId: string;
       Status: string | undefined;
     }
   | undefined
@@ -44,20 +44,17 @@ export async function handler(event: AWSLambda.CloudFormationCustomResourceEvent
     readonly VpcPeeringConnectionId?: string;
   }
 
+  const ec2 = new AWS.EC2({ customUserAgent: process.env['SOLUTION_ID'] });
   const props: RouteProps = event.ResourceProperties['routeDefinition'];
+  const resourceId = `${props.DestinationPrefixListId}${props.RouteTableId}`;
 
   switch (event.RequestType) {
     case 'Create':
+    case 'Update':
       await throttlingBackOff(() => ec2.createRoute(props).promise());
 
       return {
-        Status: 'SUCCESS',
-      };
-
-    case 'Update':
-      await throttlingBackOff(() => ec2.replaceRoute(props).promise());
-
-      return {
+        PhysicalResourceId: resourceId,
         Status: 'SUCCESS',
       };
 
@@ -69,6 +66,7 @@ export async function handler(event: AWSLambda.CloudFormationCustomResourceEvent
       );
 
       return {
+        PhysicalResourceId: event.PhysicalResourceId,
         Status: 'SUCCESS',
       };
   }

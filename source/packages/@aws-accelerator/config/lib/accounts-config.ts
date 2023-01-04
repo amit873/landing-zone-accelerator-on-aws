@@ -11,15 +11,17 @@
  *  and limitations under the License.
  */
 
-import { throttlingBackOff } from '@aws-accelerator/utils';
 import * as AWS from 'aws-sdk';
+import * as emailValidator from 'email-validator';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
 import * as path from 'path';
-import * as t from './common-types';
-import * as emailValidator from 'email-validator';
 
+import { throttlingBackOff } from '@aws-accelerator/utils';
+
+import * as t from './common-types';
 import { OrganizationConfig } from './organization-config';
+import { DeploymentTargets } from './common-types';
 
 /**
  * Accounts configuration items.
@@ -58,7 +60,17 @@ export class AccountIdConfig implements t.TypeOf<typeof AccountsConfigTypes.acco
 }
 
 /**
+ * {@link AccountsConfig} / {@link AccountConfig}
+ *
  * Account configuration
+ *
+ * @example
+ * ```
+ * - name: Workload01
+ *   description: Workload account 01
+ *   email: example-email+workload01@example.com
+ *   organizationalUnit: Workloads
+ * ```
  */
 export class AccountConfig implements t.TypeOf<typeof AccountsConfigTypes.accountConfig> {
   /**
@@ -100,9 +112,19 @@ export class AccountConfig implements t.TypeOf<typeof AccountsConfigTypes.accoun
 }
 
 /**
+ * *{@link AccountsConfig} / {@link GovCloudAccountConfig}
+ *
  * GovCloud Account configuration
  * Used instead of the account configuration in the commercial
  * partition when creating GovCloud partition linked accounts.
+ *
+ * ```
+ * - name: Workload01
+ *   description: Workload account 01
+ *   email: example-email+workload01@example.com
+ *   organizationalUnit: Workloads
+ *   enableGovCloud: true
+ * ```
  */
 export class GovCloudAccountConfig implements t.TypeOf<typeof AccountsConfigTypes.govCloudAccountConfig> {
   /**
@@ -354,6 +376,13 @@ export class AccountsConfig implements t.TypeOf<typeof AccountsConfigTypes.accou
     }
   }
 
+  // Helper function to add an account id to the list
+  private _addAccountId(ids: string[], accountId: string) {
+    if (!ids.includes(accountId)) {
+      ids.push(accountId);
+    }
+  }
+
   /**
    *
    * @param dir
@@ -453,6 +482,47 @@ export class AccountsConfig implements t.TypeOf<typeof AccountsConfigTypes.accou
     }
 
     return false;
+  }
+
+  public getAccountIdsFromDeploymentTarget(deploymentTargets: DeploymentTargets): string[] {
+    const accountIds: string[] = [];
+
+    for (const ou of deploymentTargets.organizationalUnits ?? []) {
+      // debug: processing ou
+      if (ou === 'Root') {
+        for (const account of this.accountIds ?? []) {
+          // debug: accountId
+          this._addAccountId(accountIds, account.accountId);
+        }
+      } else {
+        for (const account of [...this.mandatoryAccounts, ...this.workloadAccounts]) {
+          if (ou === account.organizationalUnit) {
+            const accountId = this.getAccountId(account.name);
+            this._addAccountId(accountIds, accountId);
+          }
+        }
+      }
+    }
+
+    for (const account of deploymentTargets.accounts ?? []) {
+      const accountId = this.getAccountId(account);
+      this._addAccountId(accountIds, accountId);
+    }
+
+    const excludedAccountIds = this.getExcludedAccountIds(deploymentTargets);
+    const filteredAccountIds = accountIds.filter(item => !excludedAccountIds.includes(item));
+
+    return filteredAccountIds;
+  }
+
+  public getExcludedAccountIds(deploymentTargets: DeploymentTargets): string[] {
+    const accountIds: string[] = [];
+
+    if (deploymentTargets.excludedAccounts) {
+      deploymentTargets.excludedAccounts.forEach(account => this._addAccountId(accountIds, this.getAccountId(account)));
+    }
+
+    return accountIds;
   }
 
   public getManagementAccount(): AccountConfig {

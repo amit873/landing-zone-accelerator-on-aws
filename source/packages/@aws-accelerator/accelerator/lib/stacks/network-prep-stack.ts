@@ -17,20 +17,26 @@ import { NagSuppressions } from 'cdk-nag';
 import { pascalCase } from 'change-case';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import * as fs from 'fs';
 
 import {
   AccountsConfig,
+  CustomerGatewayConfig,
   DnsFirewallRuleGroupConfig,
   DnsQueryLogsConfig,
   DxGatewayConfig,
   IpamConfig,
   NfwFirewallPolicyConfig,
   NfwRuleGroupConfig,
+  NfwRuleGroupRuleConfig,
   TransitGatewayConfig,
+  VpnConnectionConfig,
 } from '@aws-accelerator/config';
 import {
+  CustomerGateway,
   DirectConnectGateway,
   FirewallPolicyProperty,
+  FMSNotificationChannel,
   Ipam,
   IpamPool,
   IpamScope,
@@ -45,6 +51,7 @@ import {
   TransitGatewayRouteTable,
   VirtualInterface,
   VirtualInterfaceProps,
+  VpnConnection,
 } from '@aws-accelerator/constructs';
 
 import { Logger } from '../logger';
@@ -65,6 +72,7 @@ export class NetworkPrepStack extends AcceleratorStack {
   private domainMap: Map<string, string>;
   private dxGatewayMap: Map<string, string>;
   private nfwRuleMap: Map<string, string>;
+  private transitGatewayMap: Map<string, string>;
   private cloudwatchKey: cdk.aws_kms.Key;
   private logRetention: number;
 
@@ -90,7 +98,22 @@ export class NetworkPrepStack extends AcceleratorStack {
     //
     // Generate Transit Gateways
     //
-    this.createTransitGateways(props);
+    this.transitGatewayMap = this.createTransitGateways(props);
+
+    //
+    // Create Transit Gateway Peering Role
+    //
+    this.createTransitGatewayPeeringRole();
+
+    //
+    // Create Managed active directory accept share role
+    //
+    this.createManagedActiveDirectoryShareAcceptRole();
+
+    //
+    // Create Site-to-Site VPN connections
+    //
+    this.createVpnConnectionResources(props);
 
     //
     // Create Direct Connect Gateways and virtual interfaces
@@ -102,6 +125,14 @@ export class NetworkPrepStack extends AcceleratorStack {
     //
     this.createCentralNetworkResources(props);
 
+    //
+    // Create SSM Parameters
+    //
+    this.createSsmParameters();
+
+    // FMS Notification Channel
+    //
+    this.createFMSNotificationChannels();
     Logger.info('[network-prep-stack] Completed stack synthesis');
   }
 
@@ -109,65 +140,264 @@ export class NetworkPrepStack extends AcceleratorStack {
    * Create transit gateways
    * @param props
    */
-  private createTransitGateways(props: AcceleratorStackProps) {
+  private createTransitGateways(props: AcceleratorStackProps): Map<string, string> {
+    const transitGatewayMap = new Map<string, string>();
     for (const tgwItem of props.networkConfig.transitGateways ?? []) {
-      this.createTransitGatewayItem(tgwItem);
+      const accountId = this.accountsConfig.getAccountId(tgwItem.account);
+
+      if (accountId === cdk.Stack.of(this).account && tgwItem.region == cdk.Stack.of(this).region) {
+        const tgw = this.createTransitGatewayItem(tgwItem);
+        transitGatewayMap.set(tgwItem.name, tgw.transitGatewayId);
+      }
     }
+    return transitGatewayMap;
   }
 
   /**
    * Create transit gateway
    * @param tgwItem
    */
-  private createTransitGatewayItem(tgwItem: TransitGatewayConfig): void {
-    const accountId = this.accountsConfig.getAccountId(tgwItem.account);
-    if (accountId === cdk.Stack.of(this).account && tgwItem.region == cdk.Stack.of(this).region) {
-      Logger.info(`[network-prep-stack] Add Transit Gateway ${tgwItem.name}`);
+  private createTransitGatewayItem(tgwItem: TransitGatewayConfig): TransitGateway {
+    Logger.info(`[network-prep-stack] Add Transit Gateway ${tgwItem.name}`);
 
-      const tgw = new TransitGateway(this, pascalCase(`${tgwItem.name}TransitGateway`), {
-        name: tgwItem.name,
-        amazonSideAsn: tgwItem.asn,
-        autoAcceptSharedAttachments: tgwItem.autoAcceptSharingAttachments,
-        defaultRouteTableAssociation: tgwItem.defaultRouteTableAssociation,
-        defaultRouteTablePropagation: tgwItem.defaultRouteTablePropagation,
-        dnsSupport: tgwItem.dnsSupport,
-        vpnEcmpSupport: tgwItem.vpnEcmpSupport,
-        tags: tgwItem.tags,
-      });
+    const tgw = new TransitGateway(this, pascalCase(`${tgwItem.name}TransitGateway`), {
+      name: tgwItem.name,
+      amazonSideAsn: tgwItem.asn,
+      autoAcceptSharedAttachments: tgwItem.autoAcceptSharingAttachments,
+      defaultRouteTableAssociation: tgwItem.defaultRouteTableAssociation,
+      defaultRouteTablePropagation: tgwItem.defaultRouteTablePropagation,
+      dnsSupport: tgwItem.dnsSupport,
+      vpnEcmpSupport: tgwItem.vpnEcmpSupport,
+      tags: tgwItem.tags,
+    });
 
-      new ssm.StringParameter(this, pascalCase(`SsmParam${tgwItem.name}TransitGatewayId`), {
-        parameterName: `/accelerator/network/transitGateways/${tgwItem.name}/id`,
-        stringValue: tgw.transitGatewayId,
-      });
+    new ssm.StringParameter(this, pascalCase(`SsmParam${tgwItem.name}TransitGatewayId`), {
+      parameterName: `/accelerator/network/transitGateways/${tgwItem.name}/id`,
+      stringValue: tgw.transitGatewayId,
+    });
 
-      for (const routeTableItem of tgwItem.routeTables ?? []) {
-        Logger.info(`[network-prep-stack] Add Transit Gateway Route Tables ${routeTableItem.name}`);
+    for (const routeTableItem of tgwItem.routeTables ?? []) {
+      Logger.info(`[network-prep-stack] Add Transit Gateway Route Tables ${routeTableItem.name}`);
 
-        const routeTable = new TransitGatewayRouteTable(
-          this,
-          pascalCase(`${routeTableItem.name}TransitGatewayRouteTable`),
-          {
-            transitGatewayId: tgw.transitGatewayId,
-            name: routeTableItem.name,
-            tags: routeTableItem.tags,
-          },
+      const routeTable = new TransitGatewayRouteTable(
+        this,
+        pascalCase(`${routeTableItem.name}TransitGatewayRouteTable`),
+        {
+          transitGatewayId: tgw.transitGatewayId,
+          name: routeTableItem.name,
+          tags: routeTableItem.tags,
+        },
+      );
+
+      new ssm.StringParameter(
+        this,
+        pascalCase(`SsmParam${tgwItem.name}${routeTableItem.name}TransitGatewayRouteTableId`),
+        {
+          parameterName: `/accelerator/network/transitGateways/${tgwItem.name}/routeTables/${routeTableItem.name}/id`,
+          stringValue: routeTable.id,
+        },
+      );
+    }
+
+    if (tgwItem.shareTargets) {
+      Logger.info(`[network-prep-stack] Share transit gateway`);
+      this.addResourceShare(tgwItem, `${tgwItem.name}_TransitGatewayShare`, [tgw.transitGatewayArn]);
+    }
+    return tgw;
+  }
+
+  /**
+   * Function to create TGW peering role. This role is used to access acceptor TGW information.
+   * This role will be assumed by requestor to complete acceptance of peering request.
+   * This role is created only if account is used as accepter in TGW peering.
+   * This role gets created only in home region
+   * @returns
+   */
+  private createTransitGatewayPeeringRole() {
+    for (const transitGatewayPeeringItem of this.props.networkConfig.transitGatewayPeering ?? []) {
+      const accepterAccountId = this.props.accountsConfig.getAccountId(transitGatewayPeeringItem.accepter.account);
+
+      if (
+        accepterAccountId === cdk.Stack.of(this).account &&
+        this.props.globalConfig.homeRegion === cdk.Stack.of(this).region
+      ) {
+        const principals: cdk.aws_iam.PrincipalBase[] = [];
+
+        const requestorAccounts = this.props.networkConfig.getTgwRequestorAccountNames(
+          transitGatewayPeeringItem.accepter.account,
         );
 
-        new ssm.StringParameter(
-          this,
-          pascalCase(`SsmParam${tgwItem.name}${routeTableItem.name}TransitGatewayRouteTableId`),
-          {
-            parameterName: `/accelerator/network/transitGateways/${tgwItem.name}/routeTables/${routeTableItem.name}/id`,
-            stringValue: routeTable.id,
-          },
-        );
-      }
+        requestorAccounts.forEach(item => {
+          principals.push(new cdk.aws_iam.AccountPrincipal(this.props.accountsConfig.getAccountId(item)));
+        });
 
-      if (tgwItem.shareTargets) {
-        Logger.info(`[network-prep-stack] Share transit gateway`);
-        this.addResourceShare(tgwItem, `${tgwItem.name}_TransitGatewayShare`, [tgw.transitGatewayArn]);
+        new cdk.aws_iam.Role(this, 'TgwPeeringRole', {
+          roleName: AcceleratorStack.ACCELERATOR_TGW_PEERING_ROLE_NAME,
+          assumedBy: new cdk.aws_iam.CompositePrincipal(...principals),
+          inlinePolicies: {
+            default: new cdk.aws_iam.PolicyDocument({
+              statements: [
+                new cdk.aws_iam.PolicyStatement({
+                  effect: cdk.aws_iam.Effect.ALLOW,
+                  actions: ['ssm:GetParameters', 'ssm:GetParameter'],
+                  resources: [
+                    `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter/accelerator/network/transitGateways/*`,
+                  ],
+                }),
+                new cdk.aws_iam.PolicyStatement({
+                  effect: cdk.aws_iam.Effect.ALLOW,
+                  actions: [
+                    'ec2:DescribeTransitGatewayPeeringAttachments',
+                    'ec2:AcceptTransitGatewayPeeringAttachment',
+                    'ec2:AssociateTransitGatewayRouteTable',
+                    'ec2:DisassociateTransitGatewayRouteTable',
+                    'ec2:DescribeTransitGatewayAttachments',
+                    'ec2:CreateTags',
+                  ],
+                  resources: ['*'],
+                }),
+              ],
+            }),
+          },
+        });
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
+        // rule suppression with evidence for this permission.
+        NagSuppressions.addResourceSuppressionsByPath(this, `${this.stackName}/TgwPeeringRole/Resource`, [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason: 'TgwPeeringRole needs access to create peering connections for TGWs in the account ',
+          },
+        ]);
+
+        return; // So that same env (account & region) do not try to create duplicate role, if there is multiple tgw peering for same account
       }
     }
+  }
+
+  /**
+   * Function to create Managed active directory share accept role. This role is used to assume by MAD account to auto accept share reauest
+   * This role is created only if account is a shared target for MAD.
+   * This role gets created only in home region
+   * @returns
+   */
+  private createManagedActiveDirectoryShareAcceptRole() {
+    for (const managedActiveDirectory of this.props.iamConfig.managedActiveDirectories ?? []) {
+      const madAccountId = this.props.accountsConfig.getAccountId(managedActiveDirectory.account);
+      const sharedAccountNames = this.props.iamConfig.getManageActiveDirectorySharedAccountNames(
+        managedActiveDirectory.name,
+        this.props.configDirPath,
+      );
+
+      const sharedAccountIds: string[] = [];
+      for (const account of sharedAccountNames) {
+        sharedAccountIds.push(this.props.accountsConfig.getAccountId(account));
+      }
+
+      // Create role in shared account home region only
+      if (
+        sharedAccountIds.includes(cdk.Stack.of(this).account) &&
+        cdk.Stack.of(this).region === this.props.globalConfig.homeRegion
+      ) {
+        new cdk.aws_iam.Role(this, 'MadShareAcceptRole', {
+          roleName: AcceleratorStack.ACCELERATOR_MAD_SHARE_ACCEPT_ROLE_NAME,
+          assumedBy: new cdk.aws_iam.PrincipalWithConditions(new cdk.aws_iam.AccountPrincipal(madAccountId), {
+            ArnLike: {
+              'aws:PrincipalARN': [`arn:${cdk.Stack.of(this).partition}:iam::${madAccountId}:role/AWSAccelerator-*`],
+            },
+          }),
+          inlinePolicies: {
+            default: new cdk.aws_iam.PolicyDocument({
+              statements: [
+                new cdk.aws_iam.PolicyStatement({
+                  effect: cdk.aws_iam.Effect.ALLOW,
+                  actions: ['ds:AcceptSharedDirectory'],
+                  resources: ['*'],
+                }),
+              ],
+            }),
+          },
+        });
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
+        // rule suppression with evidence for this permission.
+        NagSuppressions.addResourceSuppressionsByPath(this, `${this.stackName}/MadShareAcceptRole/Resource`, [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason: 'MAD share accept role needs access to directory for acceptance ',
+          },
+        ]);
+      }
+    }
+  }
+
+  /**
+   * Create VPN connection resources
+   * @param props
+   */
+  private createVpnConnectionResources(props: AcceleratorStackProps) {
+    //
+    // Generate Customer Gateways
+    //
+    for (const cgwItem of props.networkConfig.customerGateways ?? []) {
+      const accountId = this.accountsConfig.getAccountId(cgwItem.account);
+      if (accountId === cdk.Stack.of(this).account && cgwItem.region == cdk.Stack.of(this).region) {
+        Logger.info(`[network-prep-stack] Add Customer Gateway ${cgwItem.name} in ${cgwItem.region}`);
+        const cgw = new CustomerGateway(this, pascalCase(`${cgwItem.name}CustomerGateway`), {
+          name: cgwItem.name,
+          bgpAsn: cgwItem.asn,
+          ipAddress: cgwItem.ipAddress,
+          tags: cgwItem.tags,
+        });
+
+        new ssm.StringParameter(this, pascalCase(`SsmParam${cgwItem.name}CustomerGateway`), {
+          parameterName: `/accelerator/network/customerGateways/${cgwItem.name}/id`,
+          stringValue: cgw.customerGatewayId,
+        });
+
+        for (const vpnConnectItem of cgwItem.vpnConnections ?? []) {
+          // Make sure that VPN Connections are created for TGWs in this stack only.
+          if (vpnConnectItem.transitGateway) {
+            this.createVpnConnection(cgw, cgwItem, vpnConnectItem);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Create VPN connection item
+   * @param cgw
+   * @param cgwItem
+   * @param vpnConnectItem
+   */
+  private createVpnConnection(
+    cgw: CustomerGateway,
+    cgwItem: CustomerGatewayConfig,
+    vpnConnectItem: VpnConnectionConfig,
+  ) {
+    // Get the Transit Gateway ID
+    const transitGatewayId = this.transitGatewayMap.get(vpnConnectItem.transitGateway!);
+    if (!transitGatewayId) {
+      throw new Error(`Transit Gateway ${vpnConnectItem.transitGateway} not found`);
+    }
+
+    Logger.info(
+      `[network-prep-stack] Attaching Customer Gateway ${cgwItem.name} to ${vpnConnectItem.transitGateway} in ${cgwItem.region}`,
+    );
+    const vpnConnection = new VpnConnection(this, pascalCase(`${vpnConnectItem.name}VpnConnection`), {
+      name: vpnConnectItem.name,
+      customerGatewayId: cgw.customerGatewayId,
+      staticRoutesOnly: vpnConnectItem.staticRoutesOnly,
+      tags: vpnConnectItem.tags,
+      transitGatewayId: transitGatewayId,
+      vpnTunnelOptionsSpecifications: vpnConnectItem.tunnelSpecifications,
+    });
+
+    new ssm.StringParameter(this, pascalCase(`SsmParam${vpnConnectItem.name}VpnConnection`), {
+      parameterName: `/accelerator/network/vpnConnection/${vpnConnectItem.name}/id`,
+      stringValue: vpnConnection.vpnConnectionId,
+    });
   }
 
   /**
@@ -198,7 +428,8 @@ export class NetworkPrepStack extends AcceleratorStack {
         kmsKey: this.cloudwatchKey,
         logRetentionInDays: this.logRetention,
       });
-      new cdk.aws_ssm.StringParameter(this, pascalCase(`SsmParam${dxgwItem.name}DirectConnectGateway`), {
+      this.ssmParameters.push({
+        logicalId: pascalCase(`SsmParam${dxgwItem.name}DirectConnectGateway`),
         parameterName: `/accelerator/network/directConnectGateways/${dxgwItem.name}/id`,
         stringValue: dxGateway.directConnectGatewayId,
       });
@@ -307,7 +538,8 @@ export class NetworkPrepStack extends AcceleratorStack {
       throw new Error(`Create virtual interfaces: unable to process properties for virtual interface ${vifName}`);
     }
     const virtualInterface = new VirtualInterface(this, vifLogicalId, vifProps);
-    new cdk.aws_ssm.StringParameter(this, pascalCase(`SsmParam${dxgwName}${vifName}VirtualInterface`), {
+    this.ssmParameters.push({
+      logicalId: pascalCase(`SsmParam${dxgwName}${vifName}VirtualInterface`),
       parameterName: `/accelerator/network/directConnectGateways/${dxgwName}/virtualInterfaces/${vifName}/id`,
       stringValue: virtualInterface.virtualInterfaceId,
     });
@@ -412,6 +644,56 @@ export class NetworkPrepStack extends AcceleratorStack {
       //
       for (const policyItem of centralConfig.networkFirewall?.policies ?? []) {
         this.createNfwPolicy(delegatedAdminAccountId, policyItem);
+      }
+    }
+  }
+
+  /**
+   * Creates FMS Notification Channels
+   */
+  private createFMSNotificationChannels() {
+    const fmsConfiguration = this.props.networkConfig.firewallManagerService;
+    // Exit if Notification channels don't exist.
+    if (!fmsConfiguration?.notificationChannels || fmsConfiguration.notificationChannels.length === 0) {
+      return;
+    }
+    const accountId = this.accountsConfig.getAccountId(fmsConfiguration.delegatedAdminAccount);
+    const auditAccountId = this.props.accountsConfig.getAuditAccountId();
+    const roleArn = `arn:${cdk.Stack.of(this).partition}:iam::${
+      cdk.Stack.of(this).account
+    }:role/AWSAccelerator-FMS-Notifications`;
+
+    for (const notificationChannel of fmsConfiguration.notificationChannels) {
+      const snsTopicName = notificationChannel.snsTopic;
+      if (accountId === cdk.Stack.of(this).account && notificationChannel.region === cdk.Stack.of(this).region) {
+        const snsTopicsSecurity =
+          this.props.securityConfig.centralSecurityServices.snsSubscriptions?.map(
+            snsSubscription => snsSubscription.level,
+          ) || [];
+        const snsTopicsGlobal = this.props.globalConfig.snsTopics?.topics.map(snsTopic => snsTopic.name) || [];
+        const snsTopics = [...snsTopicsSecurity, ...snsTopicsGlobal];
+        if (!snsTopics.includes(snsTopicName)) {
+          throw new Error(`SNS Topic level ${snsTopicName} does not exist in the security config SNS Topics`);
+        }
+        let snsTopicArn = `arn:${cdk.Stack.of(this).partition}:sns:${cdk.Stack.of(this).region}:${
+          cdk.Stack.of(this).account
+        }:aws-accelerator-${snsTopicName}`;
+
+        if (snsTopicsSecurity.includes(snsTopicName)) {
+          snsTopicArn = `arn:${cdk.Stack.of(this).partition}:sns:${
+            cdk.Stack.of(this).region
+          }:${auditAccountId}:aws-accelerator-${snsTopicName}Notifications`;
+        }
+        Logger.info(
+          `[network-prep-stack] Adding FMS notification channel for ${fmsConfiguration.delegatedAdminAccount} in region ${notificationChannel.region} to topic ${snsTopicArn}`,
+        );
+
+        new FMSNotificationChannel(this, `fmsNotification-${this.account}-${this.region}`, {
+          snsTopicArn,
+          snsRoleArn: roleArn,
+        });
+
+        Logger.info(`[network-prep-stack] Created FMS notification Channel`);
       }
     }
   }
@@ -707,9 +989,9 @@ export class NetworkPrepStack extends AcceleratorStack {
       const centralLogsBucket = cdk.aws_s3.Bucket.fromBucketName(
         this,
         'CentralLogsBucket',
-        `aws-accelerator-central-logs-${this.accountsConfig.getLogArchiveAccountId()}-${
-          this.props.globalConfig.homeRegion
-        }`,
+        `${
+          AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX
+        }-${this.accountsConfig.getLogArchiveAccountId()}-${this.props.centralizedLoggingRegion}`,
       );
 
       const s3QueryLogConfig = new QueryLoggingConfig(this, pascalCase(`${logItem.name}S3QueryLogConfig`), {
@@ -762,6 +1044,31 @@ export class NetworkPrepStack extends AcceleratorStack {
   }
 
   /**
+   * Function to read suricata rule file and get rule definition
+   * @param fileName
+   * @param fileContent
+   * @returns
+   */
+  private getSuricataRules(fileName: string, fileContent: string): string {
+    const rules: string[] = [];
+    // Suricata supported action type list
+    // @link https://suricata.readthedocs.io/en/suricata-6.0.2/rules/intro.html#action
+    const suricataRuleActionType = ['alert', 'pass', 'drop', 'reject', 'rejectsrc', 'rejectdst', 'rejectboth'];
+    fileContent.split(/\r?\n/).forEach(line => {
+      const ruleAction = line.split(' ')[0];
+      if (suricataRuleActionType.includes(ruleAction)) {
+        rules.push(line);
+      }
+    });
+
+    if (rules.length > 0) {
+      return rules.join('\n');
+    } else {
+      throw new Error(`[network-prep-stack] No rule definition found in suricata rules file ${fileName}`);
+    }
+  }
+
+  /**
    * Create AWS Network Firewall rule group
    * @param accountId
    * @param ruleItem
@@ -774,12 +1081,34 @@ export class NetworkPrepStack extends AcceleratorStack {
     // Create regional rule groups in the delegated admin account
     if (accountId === cdk.Stack.of(this).account && regions.includes(cdk.Stack.of(this).region)) {
       Logger.info(`[network-prep-stack] Create network firewall rule group ${ruleItem.name}`);
+      let nfwRuleGroupRuleConfig: NfwRuleGroupRuleConfig | undefined;
+
+      //
+      // When suricata rule files used
+      if (ruleItem.ruleGroup?.rulesSource.rulesFile) {
+        nfwRuleGroupRuleConfig = {
+          rulesSource: {
+            rulesString: this.getSuricataRules(
+              ruleItem.ruleGroup?.rulesSource.rulesFile,
+              fs.readFileSync(path.join(this.props.configDirPath, ruleItem.ruleGroup?.rulesSource.rulesFile), 'utf8'),
+            ),
+            rulesSourceList: undefined,
+            statefulRules: undefined,
+            statelessRulesAndCustomActions: undefined,
+            rulesFile: undefined,
+          },
+          ruleVariables: ruleItem.ruleGroup?.ruleVariables,
+          statefulRuleOptions: undefined,
+        };
+      } else {
+        nfwRuleGroupRuleConfig = ruleItem.ruleGroup;
+      }
       const rule = new NetworkFirewallRuleGroup(this, pascalCase(`${ruleItem.name}NetworkFirewallRuleGroup`), {
         capacity: ruleItem.capacity,
         name: ruleItem.name,
         type: ruleItem.type,
         description: ruleItem.description,
-        ruleGroup: ruleItem.ruleGroup,
+        ruleGroup: nfwRuleGroupRuleConfig,
         tags: ruleItem.tags ?? [],
       });
       this.nfwRuleMap.set(ruleItem.name, rule.groupArn);

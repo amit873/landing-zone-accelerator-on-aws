@@ -11,13 +11,12 @@
  *  and limitations under the License.
  */
 
-import * as t from './common-types';
 import * as fs from 'fs';
-import * as path from 'path';
 import * as yaml from 'js-yaml';
-
-import { OrganizationConfig } from './organization-config';
+import * as path from 'path';
 import { AccountsConfig } from './accounts-config';
+
+import * as t from './common-types';
 
 /**
  * IAM Configuration items.
@@ -149,11 +148,141 @@ export class IamConfigTypes {
   });
 
   /**
+   * Identity Center Permission Set configuration
+   */
+  static readonly identityCenterPermissionSetConfig = t.interface({
+    name: t.nonEmptyString,
+    policies: t.optional(this.policiesConfig),
+    sessionDuration: t.optional(t.number),
+  });
+
+  /**
+   * An enum for assume by configuration
+   *
+   * Possible values user or group
+   */
+  static readonly principalTypeEnum = t.enums('PrincipalType', ['USER', 'GROUP']);
+
+  /**
+   * Identity Center Assignment configuration
+   */
+  static readonly identityCenterAssignmentConfig = t.interface({
+    permissionSetName: t.nonEmptyString,
+    principalId: t.nonEmptyString,
+    principalType: this.principalTypeEnum,
+    deploymentTargets: t.deploymentTargets,
+    name: t.nonEmptyString,
+  });
+
+  /**
+   * Identity Center configuration
+   */
+  static readonly identityCenterConfig = t.interface({
+    name: t.nonEmptyString,
+    identityCenterPermissionSets: t.optional(t.array(this.identityCenterPermissionSetConfig)),
+    identityCenterAssignments: t.optional(t.array(this.identityCenterAssignmentConfig)),
+  });
+
+  /**
    * IAM policy set configuration
    */
   static readonly policySetConfig = t.interface({
     deploymentTargets: t.deploymentTargets,
     policies: t.array(this.policyConfig),
+  });
+
+  /**
+   * Managed active directory user configuration
+   */
+  static activeDirectoryUserConfig = t.interface({
+    name: t.nonEmptyString,
+    email: t.nonEmptyString,
+    groups: t.array(t.nonEmptyString),
+  });
+
+  /**
+   * Managed active directory user password policy
+   */
+  static activeDirectoryPasswordPolicyConfig = t.interface({
+    history: t.number,
+    maximumAge: t.number,
+    minimumAge: t.number,
+    minimumLength: t.number,
+    complexity: t.boolean,
+    reversible: t.boolean,
+    failedAttempts: t.number,
+    lockoutDuration: t.number,
+    lockoutAttemptsReset: t.number,
+  });
+
+  /**
+   * Managed active directory configuration instance user data script configuration
+   */
+  static activeDirectoryConfigurationInstanceUserDataConfig = t.interface({
+    scriptName: t.nonEmptyString,
+    scriptFilePath: t.nonEmptyString,
+  });
+
+  /**
+   * Managed active directory configuration instance config
+   */
+  static activeDirectoryConfigurationInstanceConfig = t.interface({
+    instanceType: t.nonEmptyString,
+    vpcName: t.nonEmptyString,
+    imagePath: t.nonEmptyString,
+    securityGroupInboundSources: t.array(t.nonEmptyString),
+    instanceRole: t.nonEmptyString,
+    subnetName: t.nonEmptyString,
+    userDataScripts: t.array(this.activeDirectoryConfigurationInstanceUserDataConfig),
+    adGroups: t.array(t.nonEmptyString),
+    adPerAccountGroups: t.array(t.nonEmptyString),
+    adConnectorGroup: t.nonEmptyString,
+    adUsers: t.array(this.activeDirectoryUserConfig),
+    adPasswordPolicy: this.activeDirectoryPasswordPolicyConfig,
+  });
+
+  /**
+   * Managed active directory vpc settings config
+   */
+  static readonly managedActiveDirectoryVpcSettingsConfig = t.interface({
+    vpcName: t.nonEmptyString,
+    subnets: t.array(t.nonEmptyString),
+  });
+
+  static readonly managedActiveDirectoryLogConfig = t.interface({
+    groupName: t.nonEmptyString,
+    retentionInDays: t.optional(t.number),
+  });
+
+  static readonly managedActiveDirectorySecretConfig = t.interface({
+    account: t.optional(t.nonEmptyString),
+    region: t.optional(t.region),
+    adminSecretName: t.optional(t.nonEmptyString),
+  });
+
+  static readonly managedActiveDirectorySharedOuConfig = t.interface({
+    organizationalUnits: t.array(t.nonEmptyString),
+    excludedAccounts: t.optional(t.array(t.nonEmptyString)),
+  });
+
+  /**
+   * Managed active directory config
+   */
+  static readonly managedActiveDirectoryConfig = t.interface({
+    name: t.nonEmptyString,
+    account: t.nonEmptyString,
+    region: t.region,
+    dnsName: t.nonEmptyString,
+    netBiosDomainName: t.nonEmptyString,
+    description: t.optional(t.nonEmptyString),
+    edition: t.enums('DirectorySize', ['Standard', 'Enterprise']),
+    vpcSettings: IamConfigTypes.managedActiveDirectoryVpcSettingsConfig,
+    resolverRuleName: t.nonEmptyString,
+    secretConfig: t.optional(this.managedActiveDirectorySecretConfig),
+    sharedOrganizationalUnits: t.optional(this.managedActiveDirectorySharedOuConfig),
+    sharedAccounts: t.optional(t.array(t.nonEmptyString)),
+    logs: t.optional(IamConfigTypes.managedActiveDirectoryLogConfig),
+    activeDirectoryConfigurationInstance: t.optional(this.activeDirectoryConfigurationInstanceConfig),
   });
 
   /**
@@ -165,11 +294,451 @@ export class IamConfigTypes {
     roleSets: t.optional(t.array(this.roleSetConfig)),
     groupSets: t.optional(t.array(this.groupSetConfig)),
     userSets: t.optional(t.array(this.userSetConfig)),
+    managedActiveDirectories: t.optional(t.array(this.managedActiveDirectoryConfig)),
+    identityCenter: t.optional(this.identityCenterConfig),
   });
 }
 
 /**
+ * Active directory shared ou configuration.
+ *
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ManagedActiveDirectorySharedOuConfig}*
+ *
+ * @example
+ *
+ * ```
+ * sharedOrganizationalUnits:
+ *  organizationalUnits:
+ *    - root
+ *  excludedAccounts:
+ *    - Audit
+ * ```
+ */
+export class ManagedActiveDirectorySharedOuConfig
+  implements t.TypeOf<typeof IamConfigTypes.managedActiveDirectorySharedOuConfig>
+{
+  readonly organizationalUnits: string[] = [];
+  readonly excludedAccounts: string[] | undefined = undefined;
+}
+
+/**
+ * Active directory admin user secret configuration.
+ *
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ManagedActiveDirectorySecretConfig}*
+ *
+ * @example
+ *
+ * ```
+ * secretConfig:
+ *  account: Audit
+ *  region: us-east-1
+ *  adminSecretName: admin
+ * ```
+ */
+export class ManagedActiveDirectorySecretConfig
+  implements t.TypeOf<typeof IamConfigTypes.managedActiveDirectorySecretConfig>
+{
+  /**
+   * Active directory admin user secret name. LZA will prefix /accelerator/ad-user/<DirectoryName>/ for the secret name
+   * For example when secret name value was given as admin-secret and directory name is AcceleratorManagedActiveDirectory
+   * LZA will create secret name as /accelerator/ad-user/AcceleratorManagedActiveDirectory/admin-secret
+   */
+  readonly adminSecretName: string | undefined = undefined;
+  /**
+   * Active directory admin user secret account name. When no account name provided LZA will create the secret into the account MAD exists
+   */
+  readonly account: string | undefined = undefined;
+  /**
+   * Active directory admin user secret region name. When no region name provided LZA will create the secret into the region MAD exists
+   */
+  readonly region: t.Region = 'us-east-1';
+}
+
+/**
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ActiveDirectoryConfigurationInstanceConfig} / {@link ActiveDirectoryConfigurationInstanceUserDataConfig}*
+ *
+ * User data scripts to create users, groups, password policy.
+ *
+ * LZA can be provision users, groups when following user data scripts are provided, these scripts are part of LZA best practices
+ *  @example
+ * ```
+ *      userDataScripts:
+ *        - scriptName: JoinDomain
+ *          scriptFilePath: ad-config-scripts/Join-Domain.ps1
+ *        - scriptName: InitializeRDGW ## Do not Need
+ *          scriptFilePath: ad-config-scripts/Initialize-RDGW.ps1
+ *        - scriptName: AWSQuickStart
+ *          scriptFilePath: ad-config-scripts/AWSQuickStart.psm1
+ *        - scriptName: ADGroupSetup
+ *          scriptFilePath: ad-config-scripts/AD-group-setup.ps1
+ *        - scriptName: ADUserSetup
+ *          scriptFilePath: ad-config-scripts/AD-user-setup.ps1
+ *        - scriptName: ADUserGroupSetup
+ *          scriptFilePath: ad-config-scripts/AD-user-group-setup.ps1
+ *        - scriptName: ADGroupGrantPermissionsSetup
+ *          scriptFilePath: ad-config-scripts/AD-group-grant-permissions-setup.ps1
+ *        - scriptName: ADConnectorPermissionsSetup
+ *          scriptFilePath: ad-config-scripts/AD-connector-permissions-setup.ps1
+ *        - scriptName: ConfigurePasswordPolicy
+ *          scriptFilePath: ad-config-scripts/Configure-password-policy.ps1
+ * ```
+ */
+export class ActiveDirectoryConfigurationInstanceUserDataConfig
+  implements t.TypeOf<typeof IamConfigTypes.activeDirectoryConfigurationInstanceUserDataConfig>
+{
+  /**
+   * Friendly name for the user data script
+   */
+  readonly scriptName = '';
+  /**
+   * Script file path
+   */
+  readonly scriptFilePath = '';
+}
+
+/**
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ActiveDirectoryConfigurationInstanceConfig} / {@link ActiveDirectoryPasswordPolicyConfig}*
+ *
+ * Managed active directory user password policy configuration
+ */
+export class ActiveDirectoryPasswordPolicyConfig
+  implements t.TypeOf<typeof IamConfigTypes.activeDirectoryPasswordPolicyConfig>
+{
+  readonly history = 24;
+  readonly maximumAge = 90;
+  readonly minimumAge = 1;
+  readonly minimumLength = 14;
+  readonly complexity = true;
+  readonly reversible = false;
+  readonly failedAttempts = 6;
+  readonly lockoutDuration = 30;
+  readonly lockoutAttemptsReset = 30;
+}
+
+/**
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ActiveDirectoryConfigurationInstanceConfig} / {@link ActiveDirectoryUserConfig}*
+ *
+ *
+ * Active directory user configuration
+ */
+export class ActiveDirectoryUserConfig implements t.TypeOf<typeof IamConfigTypes.activeDirectoryUserConfig> {
+  /**
+   * Active directory user name
+   */
+  readonly name = '';
+  /**
+   * Active directory user email
+   */
+  readonly email = '';
+  /**
+   * Active directory user group names
+   */
+  readonly groups = [];
+}
+
+/**
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ActiveDirectoryConfigurationInstanceConfig}*
+ *
+ * Active directory configuration instance configuration. The machine will be used to configure and manage active directory configuration.
+ * LZA can create user, groups when following configuration provided
+ *
+ * @example
+ *
+ * ```
+ *    activeDirectoryConfigurationInstance:
+ *      instanceType: t3.large
+ *      vpcName: MyVpc
+ *      subnetName: subnet
+ *      imagePath: /aws/service/ami-windows-latest/Windows_Server-2016-English-Full-Base
+ *      securityGroupInboundSources:
+ *        - 10.0.0.0/16
+ *      instanceRole: EC2-Default-SSM-AD-Role
+ *      userDataScripts:
+ *        - scriptName: JoinDomain
+ *          scriptFilePath: ad-config-scripts/Join-Domain.ps1
+ *        - scriptName: InitializeRDGW ## Do not Need
+ *          scriptFilePath: ad-config-scripts/Initialize-RDGW.ps1
+ *        - scriptName: AWSQuickStart
+ *          scriptFilePath: ad-config-scripts/AWSQuickStart.psm1
+ *        - scriptName: ADGroupSetup
+ *          scriptFilePath: ad-config-scripts/AD-group-setup.ps1
+ *        - scriptName: ADUserSetup
+ *          scriptFilePath: ad-config-scripts/AD-user-setup.ps1
+ *        - scriptName: ADUserGroupSetup
+ *          scriptFilePath: ad-config-scripts/AD-user-group-setup.ps1
+ *        - scriptName: ADGroupGrantPermissionsSetup
+ *          scriptFilePath: ad-config-scripts/AD-group-grant-permissions-setup.ps1
+ *        - scriptName: ADConnectorPermissionsSetup
+ *          scriptFilePath: ad-config-scripts/AD-connector-permissions-setup.ps1
+ *        - scriptName: ConfigurePasswordPolicy
+ *          scriptFilePath: ad-config-scripts/Configure-password-policy.ps1
+ *      adGroups:
+ *        - aws-Provisioning
+ *        - aws-Billing
+ *      adPerAccountGroups:
+ *        - "*-Admin"
+ *        - "*-PowerUser"
+ *        - "*-View"
+ *      adConnectorGroup: ADConnector-grp
+ *      sharedAccounts:
+ *        - Management
+ *        - Audit
+ *        - LogArchive
+ *      adPasswordPolicy:
+ *        history: 24
+ *        maximumAge: 90
+ *        minimumAge: 1
+ *        minimumLength: 14
+ *        complexity: true
+ *        reversible: false
+ *        failedAttempts: 6
+ *        lockoutDuration: 30
+ *        lockoutAttemptsReset: 30
+ *      adUsers:
+ *        - name: adconnector-usr
+ *          email: example-adconnector-usr@example.com
+ *          groups:
+ *            - ADConnector-grp
+ *        - name: user1
+ *          email: example-user1@example.com
+ *          groups:
+ *            - aws-Provisioning
+ *            - "*-View"
+ *            - "*-Admin"
+ *            - "*-PowerUser"
+ *            - AWS Delegated Administrators
+ *        - name: user2
+ *          email: example-user2@example.com
+ *          groups:
+ *            - aws-Provisioning
+ *            - "*-View"
+ * ```
+ */
+export class ActiveDirectoryConfigurationInstanceConfig
+  implements t.TypeOf<typeof IamConfigTypes.activeDirectoryConfigurationInstanceConfig>
+{
+  /**
+   * Ec2 instance type
+   */
+  readonly instanceType = '';
+  /**
+   * Ec2 instance vpc name
+   */
+  readonly vpcName = '';
+  /**
+   * Ec2 image path
+   */
+  readonly imagePath = '';
+  /**
+   * Ec2 security group inbound sources
+   *
+   */
+  readonly securityGroupInboundSources = [];
+  /**
+   * Ec2 instance role name
+   */
+  readonly instanceRole = '';
+  /**
+   * Ec2 instance subnet name
+   */
+  readonly subnetName = '';
+  /**
+   * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ActiveDirectoryConfigurationInstanceConfig} / {@link ActiveDirectoryConfigurationInstanceUserDataConfig}*
+   *
+   * Instance user data script configuration
+   */
+  readonly userDataScripts: ActiveDirectoryConfigurationInstanceUserDataConfig[] = [];
+  /**
+   * Active directory group list
+   */
+  readonly adGroups: string[] = [];
+  /**
+   * Active directory per account group list
+   */
+  readonly adPerAccountGroups: string[] = [];
+  /**
+   * Active directory connector group
+   */
+  readonly adConnectorGroup = '';
+  /**
+   * Active directory user list
+   */
+  readonly adUsers: ActiveDirectoryUserConfig[] = [];
+  /**
+   * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ActiveDirectoryConfigurationInstanceConfig} {@link ActiveDirectoryPasswordPolicyConfig}*
+   *
+   * Active directory user password policy
+   */
+  readonly adPasswordPolicy: ActiveDirectoryPasswordPolicyConfig = new ActiveDirectoryPasswordPolicyConfig();
+}
+
+/**
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig}*
+ *
+ * Active directory logs configuration
+ */
+export class ManagedActiveDirectoryLogConfig
+  implements t.TypeOf<typeof IamConfigTypes.managedActiveDirectoryLogConfig>
+{
+  /**
+   * Active directory log group name,  that will be used to receive the security logs from your domain controllers. We recommend pre-pending the name with /aws/directoryservice/, but that is not required.
+   *
+   * @default undefined, LZA will create log group name as /aws/directoryservice/DirectoryServiceName
+   */
+  readonly groupName = '';
+  /**
+   * Log group retention in days
+   */
+  readonly retentionInDays: number | undefined = undefined;
+}
+
+/**
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ManagedActiveDirectoryVpcSettingsConfig}*
+ * Specifies the VPC settings of the Microsoft AD directory server in AWS
+ *
+ * @example
+ * ```
+ * vpcSettings:
+ *  vpcName: MyVpc
+ *  subnets:
+ *    - subnet1
+ *    - subnet2
+ * ```
+ */
+export class ManagedActiveDirectoryVpcSettingsConfig
+  implements t.TypeOf<typeof IamConfigTypes.managedActiveDirectoryVpcSettingsConfig>
+{
+  /**
+   * Friendly name of the vpc where active directory will be deployed
+   */
+  readonly vpcName = '';
+  /**
+   * Friendly name of the vpc subnets, where active directory will be deployed
+   *
+   * Minimum of two subnets from two different availability zone is required
+   */
+  readonly subnets = [];
+}
+
+/**
+ * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig}*
+ *
+ * Managed Active directory configuration.
+ *
+ * @example
+ * ```
+ * managedActiveDirectories:
+ *  - name: AcceleratorManagedActiveDirectory
+ *    type: AWS Managed Microsoft AD
+ *    account: Network
+ *    region: us-east-1
+ *    dnsName: example.com
+ *    netBiosDomainName: example
+ *    description: Example managed active directory
+ *    edition: Enterprise
+ *    secretConfig:
+ *      account: Audit
+ *      region: us-east-1
+ *      adminSecretName: admin
+ *    resolverRuleName: example-com-rule
+ *    vpcSettings:
+ *      vpcName: MyVpc
+ *      subnets:
+ *        - subnet1
+ *        - subnet2
+ *    logs:
+ *      logGroupName: /aws/directoryservice/AcceleratorManagedActiveDirectory
+ *      retentionInDays: 30
+ * ```
+ */
+export class ManagedActiveDirectoryConfig implements t.TypeOf<typeof IamConfigTypes.managedActiveDirectoryConfig> {
+  /**
+   * Friendly name for the active directory
+   */
+  readonly name = '';
+  /**
+   * Active directory deploy target account
+   */
+  readonly account = '';
+  /**
+   * Active directory deploy target region
+   */
+  readonly region: t.Region = 'us-east-1';
+  /**
+   * A fully qualified domain name. This name will resolve inside your VPC only. It does not need to be publicly resolvable.
+   */
+  readonly dnsName = '';
+  /**
+   * A short identifier for your Net BIOS domain name.
+   */
+  readonly netBiosDomainName = '';
+  /**
+   * Descriptive text that appears on the details page after the directory has been created.
+   */
+  readonly description: string | undefined = undefined;
+  /**
+   * Active directory edition, example AWS Managed Microsoft AD is available in two editions: Standard and Enterprise
+   */
+  readonly edition = 'Standard';
+  /**
+   * *{@link IamConfig} / {@link ManagedActiveDirectoryVpcSettingsConfig}*
+   * Specifies the VPC settings of the Microsoft AD directory server in AWS
+   *
+   * @example
+   * ```
+   * vpcSettings:
+   *  vpcName: MyVpc
+   *  subnets:
+   *    - subnet1
+   *    - subnet2
+   * ```
+   */
+  readonly vpcSettings: ManagedActiveDirectoryVpcSettingsConfig = new ManagedActiveDirectoryVpcSettingsConfig();
+  /**
+   * Active directory route 53 resolver rule name
+   */
+  readonly resolverRuleName = '';
+  /**
+   * Active directory admin user secret configuration.
+   *
+   * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ManagedActiveDirectorySecretConfig}
+   */
+  readonly secretConfig: ManagedActiveDirectorySecretConfig | undefined = undefined;
+  /**
+   * Active directory shared ou configuration.
+   *
+   * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ManagedActiveDirectorySharedOuConfig}
+   */
+  readonly sharedOrganizationalUnits: ManagedActiveDirectorySharedOuConfig | undefined = undefined;
+  /**
+   * Active directory shared account name list.
+   */
+  readonly sharedAccounts: string[] | undefined = undefined;
+  /**
+   * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ManagedActiveDirectoryLogConfig}
+   *
+   * Active directory logs configuration
+   */
+  readonly logs: ManagedActiveDirectoryLogConfig | undefined = undefined;
+  /**
+   * *{@link IamConfig} / {@link ManagedActiveDirectoryConfig} / {@link ActiveDirectoryConfigurationInstanceConfig}*
+   *
+   * Active directory instance to configure active directory
+   */
+  readonly activeDirectoryConfigurationInstance: ActiveDirectoryConfigurationInstanceConfig | undefined = undefined;
+}
+
+/**
+ * *{@link IamConfig} / {@link SamlProviderConfig}*
+ *
  * SAML provider configuration
+ *
+ * @example
+ * ```
+ * providers:
+ *   - name: accelerator-provider
+ *     metadataDocument: path/to/metadata.xml
+ * ```
  */
 export class SamlProviderConfig implements t.TypeOf<typeof IamConfigTypes.samlProviderConfig> {
   /**
@@ -189,7 +758,16 @@ export class SamlProviderConfig implements t.TypeOf<typeof IamConfigTypes.samlPr
 }
 
 /**
+ * *{@link IamConfig} / {@link UserSetConfig} / {@link UserConfig}*
+ *
  * IAM User configuration
+ *
+ * @example
+ * ```
+ * - username: accelerator-user
+ *   boundaryPolicy: Default-Boundary-Policy
+ *   group: Admins
+ * ```
  */
 export class UserConfig implements t.TypeOf<typeof IamConfigTypes.userConfig> {
   /**
@@ -215,7 +793,20 @@ export class UserConfig implements t.TypeOf<typeof IamConfigTypes.userConfig> {
 }
 
 /**
+ * *{@link IamConfig} / {@link UserSetConfig}*
+ *
  * User set configuration
+ *
+ * ```
+ * userSets:
+ *   - deploymentTargets:
+ *       accounts:
+ *         - Management
+ *     users:
+ *       - username: accelerator-user
+ *         boundaryPolicy: Default-Boundary-Policy
+ *         group: Admins
+ * ```
  */
 export class UserSetConfig implements t.TypeOf<typeof IamConfigTypes.userSetConfig> {
   /**
@@ -229,7 +820,17 @@ export class UserSetConfig implements t.TypeOf<typeof IamConfigTypes.userSetConf
 }
 
 /**
+ * *{@link IamConfig} / {@link GroupConfig} | {@link RoleConfig} / {@link PoliciesConfig}*
+ *
  * IAM policies configuration
+ *
+ * @example
+ * ```
+ * awsManaged:
+ *   - AdministratorAccess
+ * customerManaged:
+ *   - PolicyName
+ * ```
  */
 export class PoliciesConfig implements t.TypeOf<typeof IamConfigTypes.policiesConfig> {
   /**
@@ -243,7 +844,17 @@ export class PoliciesConfig implements t.TypeOf<typeof IamConfigTypes.policiesCo
 }
 
 /**
+ * *{@link IamConfig} / {@link GroupSetConfig} / {@link GroupConfig}*
+ *
  * IAM group configuration
+ *
+ * @example
+ * ```
+ * - name: Admins
+ *   policies:
+ *     awsManaged:
+ *       - AdministratorAccess
+ * ```
  */
 export class GroupConfig implements t.TypeOf<typeof IamConfigTypes.groupConfig> {
   /**
@@ -261,7 +872,22 @@ export class GroupConfig implements t.TypeOf<typeof IamConfigTypes.groupConfig> 
 }
 
 /**
+ * *{@link IamConfig} / {@link GroupSetConfig}*
+ *
  * IAM group set configuration
+ *
+ * @example
+ * ```
+ * groupSets:
+ *   - deploymentTargets:
+ *       accounts:
+ *         - Management
+ *     groups:
+ *       - name: Admins
+ *         policies:
+ *           awsManaged:
+ *             - AdministratorAccess
+ * ```
  */
 export class GroupSetConfig implements t.TypeOf<typeof IamConfigTypes.groupSetConfig> {
   /**
@@ -275,7 +901,15 @@ export class GroupSetConfig implements t.TypeOf<typeof IamConfigTypes.groupSetCo
 }
 
 /**
+ * *{@link IamConfig} / {@link RoleSetConfig} / {@link RoleConfig} / {@link AssumedByConfig}*
+ *
  * Assumedby configuration
+ *
+ * @example
+ * ```
+ * - principal: ec2.amazonaws.com
+ *   type: service
+ * ```
  */
 export class AssumedByConfig implements t.TypeOf<typeof IamConfigTypes.assumedByConfig> {
   /**
@@ -291,7 +925,24 @@ export class AssumedByConfig implements t.TypeOf<typeof IamConfigTypes.assumedBy
 }
 
 /**
+ * *{@link IamConfig} / {@link RoleSetConfig} / {@link RoleConfig}*
+ *
  * IAM Role configuration
+ *
+ * @example
+ * ```
+ * - name: EC2-Default-SSM-AD-Role
+ *   assumedBy:
+ *     - principal: ec2.amazonaws.com
+ *       type: service
+ *   boundaryPolicy: Default-Boundary-Policy
+ *   instanceProfile: true
+ *   policies:
+ *     awsManaged:
+ *       - AmazonSSMManagedInstanceCore
+ *       - AmazonSSMDirectoryServiceAccess
+ *       - CloudWatchAgentServerPolicy
+ * ```
  */
 export class RoleConfig implements t.TypeOf<typeof IamConfigTypes.roleConfig> {
   /**
@@ -317,7 +968,163 @@ export class RoleConfig implements t.TypeOf<typeof IamConfigTypes.roleConfig> {
 }
 
 /**
+ * *{@link IamConfig} / {@link IdentityCenterConfig}*
+ *
+ * Identity Center Configuration
+ *
+ * @example
+ * ```
+identityCenter:
+  name: identityCenter1
+  identityCenterPermissionSets:
+    - name: PermissionSet1
+      policies:
+        awsManaged:
+          - arn:aws:iam::aws:policy/AdministratorAccess
+        customerManaged:
+          - ResourceConfigurationCollectorPolicy
+      sessionDuration: 60
+
+  identityCenterAssignments:
+    - name: Assignment1
+      permissionSetName: PermissionSet1
+      principalId: "a4e81468-1001-70f0-9c12-56a6aa967ca4"
+      principalType: USER
+      deploymentTargets:
+        accounts:
+          - LogArchive
+ * ```
+ */
+
+export class IdentityCenterConfig implements t.TypeOf<typeof IamConfigTypes.identityCenterConfig> {
+  /**
+   * A name for the Identity Center Configuration
+   */
+  readonly name: string = '';
+
+  /**
+   * List of PermissionSets
+   */
+  readonly identityCenterPermissionSets: IdentityCenterPermissionSetConfig[] = [];
+
+  /**
+   * List of Assignments
+   */
+  readonly identityCenterAssignments: IdentityCenterAssignmentConfig[] = [];
+}
+
+/**
+ * *{@link IamConfig} / {@link IdentityCenterPermissionSetConfig}*
+ *
+ * Identity Center Permission Set Configuration
+ *
+ * @example
+ * ```
+name: identityCenter1
+identityCenterPermissionSets:
+  - name: PermissionSet1
+    policies:
+      awsManaged:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      customerManaged:
+        - ResourceConfigurationCollectorPolicy
+    sessionDuration: 60
+  * ```
+  */
+export class IdentityCenterPermissionSetConfig
+  implements t.TypeOf<typeof IamConfigTypes.identityCenterPermissionSetConfig>
+{
+  /**
+   * A name for the Identity Center Permission Set Configuration
+   */
+  readonly name: string = '';
+
+  /**
+   * Policy Configuration for Customer Managed Permissions and AWS Managed Permissions
+   */
+  readonly policies: PoliciesConfig | undefined = undefined;
+
+  /**
+   * A number value (in minutes) for length of SSO session Duration association with Permissions Set (Defaults to 60).
+   */
+  readonly sessionDuration: number = 60;
+}
+
+/**
+ * *{@link IamConfig} / {@link IdentityCenterAssignmentConfig}*
+ *
+ * Identity Center Assignment Configuration
+ *
+ * @example
+ * ```
+identityCenterAssignments:
+  - name: Assignment1
+    permissionSetName: PermissionSet1
+    principalId: "a4e81468-1001-70f0-9c12-56a6aa967ca4"
+    principalType: USER
+    deploymentTargets:
+      accounts:
+        - LogArchive
+  - name: Assignment2
+    permissionSetName: PermissionSet2
+    principalId: "a4e81468-1001-70f0-9c12-56a6aa967ca4"
+    principalType: GROUP
+    deploymentTargets:
+      organizationalUnits:
+        - Security
+  * ```
+  */
+export class IdentityCenterAssignmentConfig implements t.TypeOf<typeof IamConfigTypes.identityCenterAssignmentConfig> {
+  /**
+   * The Name for the Assignment
+   */
+  readonly name: string = '';
+
+  /**
+   * Arn of the Permission Set that will be used for the Assignment
+   */
+  readonly permissionSetName: string = '';
+
+  /**
+   * PrincipalId that will be used for the Assignment
+   */
+  readonly principalId: string = '';
+
+  /**
+   * PrinipalType that will be used for the Assignment
+   */
+  readonly principalType: t.TypeOf<typeof IamConfigTypes.principalTypeEnum> = 'USER';
+
+  /**
+   * Role set deployment targets
+   */
+  readonly deploymentTargets: t.DeploymentTargets = new t.DeploymentTargets();
+}
+
+/**
+ * *{@link IamConfig} / {@link RoleSetConfig}*
+ *
  * Role set configuration
+ *
+ * @example
+ * ```
+ * roleSets:
+ *   - deploymentTargets:
+ *       organizationalUnits:
+ *         - Root
+ *     roles:
+ *       - name: EC2-Default-SSM-AD-Role
+ *         assumedBy:
+ *           - principal: ec2.amazonaws.com
+ *             type: service
+ *         boundaryPolicy: Default-Boundary-Policy
+ *         instanceProfile: true
+ *         policies:
+ *           awsManaged:
+ *             - AmazonSSMManagedInstanceCore
+ *             - AmazonSSMDirectoryServiceAccess
+ *             - CloudWatchAgentServerPolicy
+ * ```
  */
 export class RoleSetConfig implements t.TypeOf<typeof IamConfigTypes.roleSetConfig> {
   /**
@@ -335,7 +1142,15 @@ export class RoleSetConfig implements t.TypeOf<typeof IamConfigTypes.roleSetConf
 }
 
 /**
+ * *{@link IamConfig} / {@link PolicySetConfig} / {@link PolicyConfig}*
+ *
  * IAM policy configuration
+ *
+ * @example
+ * ```
+ * - name: Default-Boundary-Policy
+ *   policy: path/to/policy.json
+ * ```
  */
 export class PolicyConfig implements t.TypeOf<typeof IamConfigTypes.policyConfig> {
   /**
@@ -343,13 +1158,26 @@ export class PolicyConfig implements t.TypeOf<typeof IamConfigTypes.policyConfig
    */
   readonly name: string = '';
   /**
-   * A XML file containing policy boundary definition
+   * A JSON file containing policy boundary definition
    */
   readonly policy: string = '';
 }
 
 /**
+ * *{@link IamConfig} / {@link PolicySetConfig}*
+ *
  * Policy set configuration
+ *
+ * @example
+ * ```
+ * policySets:
+ *   - deploymentTargets:
+ *       organizationalUnits:
+ *         - Root
+ *     policies:
+ *       - name: Default-Boundary-Policy
+ *         policy: path/to/policy.json
+ * ```
  */
 export class PolicySetConfig implements t.TypeOf<typeof IamConfigTypes.policySetConfig> {
   /**
@@ -378,8 +1206,8 @@ export class IamConfig implements t.TypeOf<typeof IamConfigTypes.iamConfig> {
    * @example
    * ```
    * providers:
-   *  name: <PROVIDER_NAME>,
-   *  metadataDocument: <METADATA_DOCUMENT_FILE>,
+   *  - name: <PROVIDER_NAME>
+   *    metadataDocument: <METADATA_DOCUMENT_FILE>
    */
   readonly providers: SamlProviderConfig[] = [];
 
@@ -470,329 +1298,144 @@ export class IamConfig implements t.TypeOf<typeof IamConfigTypes.iamConfig> {
   readonly userSets: UserSetConfig[] = [];
 
   /**
+   * Identity Center configuration
+   *
+   * To configure Identity Center, you need to provide following values for this parameter.
+   *
+   * @example
+   * ```
+   * idetityCenterPermissionSets:
+   *   - deploymentTargets:
+   *       organizationalUnits:
+   *         - Root
+   *     groups:
+   *       - name: Administrators
+   *         policies:
+   *           awsManaged:
+   *             - AdministratorAccess
+   * ```
+   */
+
+  readonly identityCenter: IdentityCenterConfig | undefined = undefined;
+
+  /**
+   * Managed active directory configuration
+   *
+   * To configure AWS Microsoft managed active directory of enterprise edition, along with LZA provisioned EC2 instance to pre configure directory users. group,
+   * you need to provide following values for this parameter.
+   *
+   * @example
+   * ```
+   * managedActiveDirectories:
+   *  - name: AcceleratorManagedActiveDirectory
+   *    type: AWS Managed Microsoft AD
+   *    account: Network
+   *    region: us-east-1
+   *    dnsName: example.com
+   *    netBiosDomainName: example
+   *    description: Example managed active directory
+   *    edition: Enterprise
+   *    adminSecret:
+   *      name: admin-secret
+   *      account: Audit
+   *      region: us-east-1
+   *    resolverRuleName: example-com-rule
+   *    vpcSettings:
+   *      vpcName: MyVpc
+   *      subnets:
+   *        - subnet1
+   *        - subnet2
+   *    logs:
+   *      logGroupName: /aws/directoryservice/AcceleratorManagedActiveDirectory
+   *      retentionInDays: 30
+   *    activeDirectoryConfigurationInstance:
+   *      instanceType: t3.large
+   *      vpcName: MyVpc
+   *      subnetName: subnet
+   *      imagePath: /aws/service/ami-windows-latest/Windows_Server-2016-English-Full-Base
+   *      securityGroupInboundSources:
+   *        - 10.0.0.0/16
+   *      instanceRole: EC2-Default-SSM-AD-Role
+   *      userDataScripts:
+   *        - scriptName: JoinDomain
+   *          scriptFilePath: ad-config-scripts/Join-Domain.ps1
+   *        - scriptName: InitializeRDGW ## Do not Need
+   *          scriptFilePath: ad-config-scripts/Initialize-RDGW.ps1
+   *        - scriptName: AWSQuickStart
+   *          scriptFilePath: ad-config-scripts/AWSQuickStart.psm1
+   *        - scriptName: ADGroupSetup
+   *          scriptFilePath: ad-config-scripts/AD-group-setup.ps1
+   *        - scriptName: ADUserSetup
+   *          scriptFilePath: ad-config-scripts/AD-user-setup.ps1
+   *        - scriptName: ADUserGroupSetup
+   *          scriptFilePath: ad-config-scripts/AD-user-group-setup.ps1
+   *        - scriptName: ADGroupGrantPermissionsSetup
+   *          scriptFilePath: ad-config-scripts/AD-group-grant-permissions-setup.ps1
+   *        - scriptName: ADConnectorPermissionsSetup
+   *          scriptFilePath: ad-config-scripts/AD-connector-permissions-setup.ps1
+   *        - scriptName: ConfigurePasswordPolicy
+   *          scriptFilePath: ad-config-scripts/Configure-password-policy.ps1
+   *      adGroups:
+   *        - aws-Provisioning
+   *        - aws-Billing
+   *      adPerAccountGroups:
+   *        - "*-Admin"
+   *        - "*-PowerUser"
+   *        - "*-View"
+   *      adConnectorGroup: ADConnector-grp
+   *      sharedAccounts:
+   *        - Management
+   *        - Audit
+   *        - LogArchive
+   *      adPasswordPolicy:
+   *        history: 24
+   *        maximumAge: 90
+   *        minimumAge: 1
+   *        minimumLength: 14
+   *        complexity: true
+   *        reversible: false
+   *        failedAttempts: 6
+   *        lockoutDuration: 30
+   *        lockoutAttemptsReset: 30
+   *      adUsers:
+   *        - name: adconnector-usr
+   *          email: example-adconnector-usr@example.com
+   *          groups:
+   *            - ADConnector-grp
+   *        - name: user1
+   *          email: example-user1@example.com
+   *          groups:
+   *            - aws-Provisioning
+   *            - "*-View"
+   *            - "*-Admin"
+   *            - "*-PowerUser"
+   *            - AWS Delegated Administrators
+   *        - name: user2
+   *          email: example-user2@example.com
+   *          groups:
+   *            - aws-Provisioning
+   *            - "*-View"
+   * ```
+   */
+  readonly managedActiveDirectories: ManagedActiveDirectoryConfig[] | undefined = undefined;
+
+  /**
    *
    * @param values
-   * @param configDir
-   * @param validateConfig
    */
-  constructor(values?: t.TypeOf<typeof IamConfigTypes.iamConfig>, configDir?: string, validateConfig?: boolean) {
-    const errors: string[] = [];
-    const ouIdNames: string[] = ['Root'];
-    const accountNames: string[] = [];
-
-    //
-    // Validation errors
-    //
-    if (values) {
-      //
-      // Validation
-      if (configDir && validateConfig) {
-        //
-        // Get list of OU ID names from organization config file
-        this.getOuIdNames(configDir, ouIdNames);
-
-        //
-        // Get list of Account names from account config file
-        this.getAccountNames(configDir, accountNames);
-
-        //
-        // Validate policy file existence
-        //
-        this.validatePolicyFileExists(configDir, values, errors);
-
-        // Validate target OU names
-        this.validateDeploymentTargetOUs(values, ouIdNames, errors);
-
-        // Validate target account names
-        this.validateDeploymentTargetAccountNames(values, accountNames, errors);
-      }
-
-      if (errors.length) {
-        throw new Error(`${IamConfig.FILENAME} has ${errors.length} issues: ${errors.join(' ')}`);
-      }
-
-      Object.assign(this, values);
-    }
-  }
-
-  /**
-   * Prepare list of OU ids from organization config file
-   * @param configDir
-   */
-  private getOuIdNames(configDir: string, ouIdNames: string[]) {
-    for (const organizationalUnit of OrganizationConfig.load(configDir).organizationalUnits) {
-      ouIdNames.push(organizationalUnit.name);
-    }
-  }
-
-  /**
-   * Prepare list of Account names from account config file
-   * @param configDir
-   */
-  private getAccountNames(configDir: string, accountNames: string[]) {
-    for (const accountItem of [
-      ...AccountsConfig.load(configDir).mandatoryAccounts,
-      ...AccountsConfig.load(configDir).workloadAccounts,
-    ]) {
-      accountNames.push(accountItem.name);
-    }
-  }
-
-  /**
-   * Validate policy file existence
-   * @param configDir
-   * @param values
-   * @returns
-   */
-  private validatePolicyFileExists(
-    configDir: string,
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    errors: string[],
-  ) {
-    const policies: { name: string; policyFile: string }[] = [];
-    for (const policySet of values.policySets ?? []) {
-      for (const policy of policySet.policies) {
-        policies.push({ name: policy.name, policyFile: policy.policy });
-      }
-    }
-
-    for (const policy of policies) {
-      if (!fs.existsSync(path.join(configDir, policy.policyFile))) {
-        errors.push(`Policy definition file ${policy.policyFile} not found, for ${policy.name} !!!`);
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of policy sets target account names
-   * Make sure deployment target accounts are part of account config file
-   * @param values
-   */
-  private validatePolicySetsAccountNames(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    for (const policySet of values.policySets ?? []) {
-      for (const account of policySet.deploymentTargets.accounts ?? []) {
-        if (accountNames.indexOf(account) === -1) {
-          errors.push(
-            `Deployment target account ${account} for policy sets does not exists in accounts-config.yaml file.`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of role sets target account names
-   * Make sure deployment target accounts are part of account config file
-   * @param values
-   */
-  private validateRoleSetsAccountNames(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    for (const roleSet of values.roleSets ?? []) {
-      for (const account of roleSet.deploymentTargets.accounts ?? []) {
-        if (accountNames.indexOf(account) === -1) {
-          errors.push(
-            `Deployment target account ${account} for role sets does not exists in accounts-config.yaml file.`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of group sets target account names
-   * Make sure deployment target accounts are part of account config file
-   * @param values
-   */
-  private validateGroupSetsAccountNames(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    for (const groupSet of values.groupSets ?? []) {
-      for (const account of groupSet.deploymentTargets.accounts ?? []) {
-        if (accountNames.indexOf(account) === -1) {
-          errors.push(
-            `Deployment target account ${account} for group sets does not exists in accounts-config.yaml file.`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of user sets target account names
-   * Make sure deployment target accounts are part of account config file
-   * @param values
-   */
-  private validateUserSetsAccountNames(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    for (const userSet of values.userSets ?? []) {
-      for (const account of userSet.deploymentTargets.accounts ?? []) {
-        if (accountNames.indexOf(account) === -1) {
-          errors.push(
-            `Deployment target account ${account} for user sets does not exists in accounts-config.yaml file.`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate Deployment targets OU name for IAM services
-   * @param values
-   */
-  private validateDeploymentTargetAccountNames(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    accountNames: string[],
-    errors: string[],
-  ) {
-    //
-    // Validate policy sets account name
-    //
-    this.validatePolicySetsAccountNames(values, accountNames, errors);
-
-    //
-    // Validate role sets account name
-    //
-    this.validateRoleSetsAccountNames(values, accountNames, errors);
-
-    //
-    // Validate group sets account name
-    //
-    this.validateGroupSetsAccountNames(values, accountNames, errors);
-
-    //
-    // Validate user sets account name
-    //
-    this.validateUserSetsAccountNames(values, accountNames, errors);
-  }
-
-  /**
-   * Function to validate existence of policy sets deployment target OUs
-   * Make sure deployment target OUs are part of Organization config file
-   * @param values
-   */
-  private validatePolicySetsDeploymentTargetOUs(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    for (const policySet of values.policySets ?? []) {
-      for (const ou of policySet.deploymentTargets.organizationalUnits ?? []) {
-        if (ouIdNames.indexOf(ou) === -1) {
-          errors.push(`Deployment target OU ${ou} for policy set does not exists in organization-config.yaml file.`);
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of role sets deployment target OUs
-   * Make sure deployment target OUs are part of Organization config file
-   * @param values
-   */
-  private validateRoleSetsDeploymentTargetOUs(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    for (const roleSet of values.roleSets ?? []) {
-      for (const ou of roleSet.deploymentTargets.organizationalUnits ?? []) {
-        if (ouIdNames.indexOf(ou) === -1) {
-          errors.push(`Deployment target OU ${ou} for role set does not exists in organization-config.yaml file.`);
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of group sets deployment target OUs
-   * Make sure deployment target OUs are part of Organization config file
-   * @param values
-   */
-  private validateGroupSetsDeploymentTargetOUs(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    for (const groupSet of values.groupSets ?? []) {
-      for (const ou of groupSet.deploymentTargets.organizationalUnits ?? []) {
-        if (ouIdNames.indexOf(ou) === -1) {
-          errors.push(`Deployment target OU ${ou} for group set does not exists in organization-config.yaml file.`);
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate existence of user sets deployment target OUs
-   * Make sure deployment target OUs are part of Organization config file
-   * @param values
-   */
-  private validateUserSetsDeploymentTargetOUs(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    for (const userSet of values.userSets ?? []) {
-      for (const ou of userSet.deploymentTargets.organizationalUnits ?? []) {
-        if (ouIdNames.indexOf(ou) === -1) {
-          errors.push(`Deployment target OU ${ou} for user set does not exists in organization-config.yaml file.`);
-        }
-      }
-    }
-  }
-
-  /**
-   * Function to validate Deployment targets OU name for IAM services
-   * @param values
-   */
-  private validateDeploymentTargetOUs(
-    values: t.TypeOf<typeof IamConfigTypes.iamConfig>,
-    ouIdNames: string[],
-    errors: string[],
-  ) {
-    //
-    // Validate policy sets OU name
-    //
-    this.validatePolicySetsDeploymentTargetOUs(values, ouIdNames, errors);
-
-    //
-    // Validate role sets OU name
-    //
-    this.validateRoleSetsDeploymentTargetOUs(values, ouIdNames, errors);
-
-    //
-    // Validate group sets OU name
-    //
-    this.validateGroupSetsDeploymentTargetOUs(values, ouIdNames, errors);
-
-    //
-    // Validate user sets OU name
-    //
-    this.validateUserSetsDeploymentTargetOUs(values, ouIdNames, errors);
+  constructor(values?: t.TypeOf<typeof IamConfigTypes.iamConfig>) {
+    Object.assign(this, values);
   }
 
   /**
    * Load from config file content
    * @param dir
-   * @param validateConfig
    * @returns
    */
-  static load(dir: string, validateConfig?: boolean): IamConfig {
+  static load(dir: string): IamConfig {
     const buffer = fs.readFileSync(path.join(dir, IamConfig.FILENAME), 'utf8');
     const values = t.parse(IamConfigTypes.iamConfig, yaml.load(buffer));
-    return new IamConfig(values, dir, validateConfig);
+    return new IamConfig(values);
   }
 
   /**
@@ -804,9 +1447,126 @@ export class IamConfig implements t.TypeOf<typeof IamConfigTypes.iamConfig> {
       const values = t.parse(IamConfigTypes.iamConfig, yaml.load(content));
       return new IamConfig(values);
     } catch (e) {
-      console.log('[iam-config] Error parsing input, global config undefined');
+      console.log('[iam-config] Error parsing input, iam config undefined');
       console.log(`${e}`);
       return undefined;
     }
+  }
+
+  public getManageActiveDirectoryAdminSecretName(directoryName: string): string {
+    let directoryFound = false;
+    for (const managedActiveDirectory of this.managedActiveDirectories ?? []) {
+      if (managedActiveDirectory.name === directoryName) {
+        directoryFound = true;
+        if (managedActiveDirectory.secretConfig) {
+          if (managedActiveDirectory.secretConfig.adminSecretName) {
+            return managedActiveDirectory.secretConfig.adminSecretName;
+          }
+        }
+      }
+    }
+    if (directoryFound) {
+      return 'admin';
+    }
+    throw new Error(
+      `[iam-config][getManageActiveDirectoryAdminSecretName] - Directory ${directoryName} not found in iam-config file`,
+    );
+  }
+
+  public getManageActiveDirectorySecretAccountName(directoryName: string): string {
+    let directoryFound = false;
+    let directoryAccount = '';
+    for (const managedActiveDirectory of this.managedActiveDirectories ?? []) {
+      if (managedActiveDirectory.name === directoryName) {
+        directoryFound = true;
+        directoryAccount = managedActiveDirectory.account;
+        if (managedActiveDirectory.secretConfig) {
+          if (managedActiveDirectory.secretConfig.account) {
+            return managedActiveDirectory.secretConfig.account;
+          } else {
+            managedActiveDirectory.account;
+          }
+        }
+      }
+    }
+    if (directoryFound) {
+      return directoryAccount;
+    }
+    throw new Error(
+      `[iam-config][getManageActiveDirectoryAdminSecretName] - Directory ${directoryName} not found in iam-config file`,
+    );
+  }
+
+  public getManageActiveDirectorySecretRegion(directoryName: string): string {
+    let directoryFound = false;
+    let directoryRegion = '';
+    for (const managedActiveDirectory of this.managedActiveDirectories ?? []) {
+      if (managedActiveDirectory.name === directoryName) {
+        directoryFound = true;
+        directoryRegion = managedActiveDirectory.account;
+        if (managedActiveDirectory.secretConfig) {
+          if (managedActiveDirectory.secretConfig.region) {
+            return managedActiveDirectory.secretConfig.region;
+          } else {
+            managedActiveDirectory.region;
+          }
+        }
+      }
+    }
+
+    if (directoryFound) {
+      return directoryRegion;
+    }
+    throw new Error(
+      `[iam-config][getManageActiveDirectoryAdminSecretName] - Directory ${directoryName} not found in iam-config file`,
+    );
+  }
+
+  public getManageActiveDirectorySharedAccountNames(directoryName: string, configDir: string): string[] {
+    const sharedAccounts: string[] = [];
+
+    let directoryFound = false;
+    let directoryAccount: string | undefined;
+    for (const managedActiveDirectory of this.managedActiveDirectories ?? []) {
+      if (managedActiveDirectory.name === directoryName) {
+        directoryFound = true;
+        directoryAccount = managedActiveDirectory.account;
+
+        if (managedActiveDirectory.sharedOrganizationalUnits) {
+          const accountsConfig = AccountsConfig.load(configDir);
+          const allAccountItems = [...accountsConfig.mandatoryAccounts, ...accountsConfig.workloadAccounts];
+          const allAccounts: string[] = [];
+          for (const account of allAccountItems ?? []) {
+            allAccounts.push(account.name);
+          }
+          const excludedAccounts = managedActiveDirectory.sharedOrganizationalUnits.excludedAccounts ?? [];
+          const includedAccounts = allAccounts.filter(item => !excludedAccounts.includes(item));
+
+          for (const ou of managedActiveDirectory.sharedOrganizationalUnits.organizationalUnits) {
+            if (ou === 'Root') {
+              sharedAccounts.push(...includedAccounts);
+            } else {
+              for (const account of allAccountItems ?? []) {
+                if (ou === account.organizationalUnit && includedAccounts.includes(account.name)) {
+                  sharedAccounts.push(account.name);
+                }
+              }
+            }
+          }
+        }
+
+        if (managedActiveDirectory.sharedAccounts) {
+          sharedAccounts.push(...managedActiveDirectory.sharedAccounts);
+        }
+      }
+    }
+
+    if (directoryFound) {
+      // mad account can't be part of shared account
+      return sharedAccounts.filter(item => item !== directoryAccount!);
+    }
+    throw new Error(
+      `[iam-config][getManageActiveDirectorySharedAccountNames] - Directory ${directoryName} not found in iam-config file`,
+    );
   }
 }

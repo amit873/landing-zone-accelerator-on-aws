@@ -24,6 +24,8 @@ new ShareSubnetTags(stack, 'ShareSubnetTags', {
   subnetTags: [{ key: 'Key', value: 'value' }],
   sharedSubnetId: 'abcdefg123',
   owningAccountId: '9999999999',
+  vpcName: 'TestVpc',
+  subnetName: 'TestSubnet',
   resourceLoggingKmsKey: new cdk.aws_kms.Key(stack, 'CustomKey', {}),
   logRetentionInDays: 3653,
 });

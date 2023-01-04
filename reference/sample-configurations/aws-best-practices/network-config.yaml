@@ -146,6 +146,25 @@ transitGateways:
 #           organizationalUnits:
 #             - Infrastructure
 #     rules:
+#        - name: accelerator-suricata-rule-group
+#        regions:
+#          - *HOME_REGION
+#        capacity: 100
+#        type: STATEFUL
+#        ruleGroup:
+#          rulesSource:
+#            rulesFile: firewall-rules/rules.txt
+#          ruleVariables:
+#            ipSets:
+#              name: HOME_NET
+#              definition:
+#                - 10.0.0.0/16
+#                - 10.1.0.0/16
+#            portSets:
+#              name: HOME_NET
+#              definition:
+#                - '80'
+#                - '443'
 #       - name: accelerator-rule-group
 #         regions:
 #           - *HOME_REGION
@@ -743,15 +762,17 @@ vpcs:
 
 ##############################################################
 # Global configuration for VPC flow logs                     #
-# Where there is no flow log configuration defined with VPC  # 
+# Where there is no flow log configuration defined with VPC  #
 # this configuration will be used for flow log configuration #
 ##############################################################
 vpcFlowLogs:
   trafficType: ALL
   maxAggregationInterval: 600
   destinations:
-    - s3
     - cloud-watch-logs
+  destinationsConfig:
+    cloudWatchLogs:
+      retentionInDays: 30
   defaultFormat: false
   customFields:
     - version
@@ -781,10 +802,30 @@ vpcFlowLogs:
     - pkt-dst-aws-service
     - flow-direction
     - traffic-path
+###########################################
+# Customer Gateways-- use this object to  #
+# deploy customer gateways and S2S VPN    #
+# connections                             #
+###########################################
+# customerGateways:
+#   - name: accelerator-cgw
+#     account: Network
+#     region: *HOME_REGION
+#     ipAddress: 1.1.1.1
+#     asn: 65500
+#     vpnConnections:
+#       - name: TGW-VPNConnection
+#         transitGateway: Network-Main
+#         staticRoutesOnly: false
+#         tunnelSpecifications:
+#           - tunnelInsideCidr: 169.254.50.0/30
+#             preSharedKey: Thisismysecret-Abc123
+#           - tunnelInsideCidr: 169.254.60.0/30
+#             preSharedKey: Thisismysecret-Abc123
 
 #####################################
 # Direct Connect Gateways-- use this #
-# object to deploy DX Gateways,      #      
+# object to deploy DX Gateways,      #
 # virtual interfaces, and            #
 # associations to transit gateways   #
 #####################################
@@ -804,7 +845,7 @@ vpcFlowLogs:
 #         vlan: 575
 #         enableSiteLink: true
 #         jumboFrames: true
-#     transitGatewayAssociations: 
+#     transitGatewayAssociations:
 #       - name: Network-Main
 #         account: Network
 #         allowedPrefixes:
@@ -824,3 +865,15 @@ vpcFlowLogs:
 #     vpcs:
 #       - VPC-A
 #       - VPC-B
+
+#####################################
+# FMS-- use this object to enable   #
+# fms on the specified account      #
+#####################################
+# firewallManagerService:
+#   delegatedAdminAccount: SharedNetwork
+#   notificationChannels:
+#     - snsTopic: Low
+#       region: us-west-2
+#     - snsTopic: Low
+#       region: us-east-2

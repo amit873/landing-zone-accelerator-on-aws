@@ -105,6 +105,13 @@ export class InstallerStack extends cdk.Stack {
     constraintDescription: 'Must be a valid email address matching "[^\\s@]+@[^\\s@]+\\.[^\\s@]+"',
   });
 
+  private readonly controlTowerEnabled = new cdk.CfnParameter(this, 'ControlTowerEnabled', {
+    type: 'String',
+    description: 'Select yes if you deploying to a Control Tower environment.  Select no if using just Organizations',
+    allowedValues: ['Yes', 'No'],
+    default: 'Yes',
+  });
+
   /**
    * Management Account ID Parameter
    * @private
@@ -172,6 +179,10 @@ export class InstallerStack extends cdk.Stack {
           this.auditAccountEmail.logicalId,
         ],
       },
+      {
+        Label: { default: 'Environment Configuration' },
+        Parameters: [this.controlTowerEnabled.logicalId],
+      },
     ];
 
     const repositoryParameterLabels: { [p: string]: { default: string } } = {
@@ -184,6 +195,7 @@ export class InstallerStack extends cdk.Stack {
       [this.managementAccountEmail.logicalId]: { default: 'Management Account Email' },
       [this.logArchiveAccountEmail.logicalId]: { default: 'Log Archive Account Email' },
       [this.auditAccountEmail.logicalId]: { default: 'Audit Account Email' },
+      [this.controlTowerEnabled.logicalId]: { default: 'Control Tower Environment' },
     };
 
     let targetAcceleratorParameterLabels: { [p: string]: { default: string } } = {};
@@ -484,29 +496,39 @@ export class InstallerStack extends cdk.Stack {
               'if [ ! -z "$MANAGEMENT_ACCOUNT_ID" ] && [ ! -z "$MANAGEMENT_ACCOUNT_ROLE_NAME" ]; then ' +
                 'ENABLE_EXTERNAL_PIPELINE_ACCOUNT="yes"; ' +
                 'fi',
-              'if ! aws cloudformation describe-stacks --stack-name AWSAccelerator-CDKToolkit; then ' +
-                'BOOTSTRAPPED="no"; ' +
+              `if ! aws cloudformation describe-stacks --stack-name AWSAccelerator-CDKToolkit --region ${cdk.Aws.REGION}; then ` +
+                'BOOTSTRAPPED_HOME="no"; ' +
+                'fi',
+              `if ! aws cloudformation describe-stacks --stack-name AWSAccelerator-CDKToolkit --region ${globalRegion}; then ` +
+                'BOOTSTRAPPED_GLOBAL="no"; ' +
                 'fi',
             ],
           },
           build: {
             commands: [
               'cd source',
+              `if [ "${cdk.Stack.of(this).partition}" = "aws-cn" ]; then
+                  sed -i "s#registry.yarnpkg.com#registry.npmmirror.com#g" yarn.lock;
+                  yarn config set registry https://registry.npmmirror.com
+               fi`,
               'yarn install',
               'yarn lerna link',
               'yarn build',
               'cd packages/@aws-accelerator/installer',
-              `if [ "$BOOTSTRAPPED" = "no" ]; then yarn run cdk bootstrap --toolkitStackName AWSAccelerator-CDKToolkit aws://${cdk.Aws.ACCOUNT_ID}/${cdk.Aws.REGION} --qualifier accel; fi`,
-              `if [ "$BOOTSTRAPPED" = "no" ]; then yarn run cdk bootstrap --toolkitStackName AWSAccelerator-CDKToolkit aws://${cdk.Aws.ACCOUNT_ID}/${globalRegion} --qualifier accel; fi`,
+              `if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName AWSAccelerator-CDKToolkit aws://${cdk.Aws.ACCOUNT_ID}/${cdk.Aws.REGION} --qualifier accel; fi`,
+              `if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName AWSAccelerator-CDKToolkit aws://${cdk.Aws.ACCOUNT_ID}/${globalRegion} --qualifier accel; fi`,
               `if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
                   export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s" $(aws sts assume-role --role-arn arn:${
                     cdk.Stack.of(this).partition
                   }:iam::"$MANAGEMENT_ACCOUNT_ID":role/"$MANAGEMENT_ACCOUNT_ROLE_NAME" --role-session-name acceleratorAssumeRoleSession --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text));
-                  if ! aws cloudformation describe-stacks --stack-name AWSAccelerator-CDKToolkit; then MGMT_BOOTSTRAPPED="no"; fi;
-                  if [ "$MGMT_BOOTSTRAPPED" = "no" ]; then yarn run cdk bootstrap --toolkitStackName AWSAccelerator-CDKToolkit aws://$MANAGEMENT_ACCOUNT_ID/${
+                  if ! aws cloudformation describe-stacks --stack-name AWSAccelerator-CDKToolkit --region ${
+                    cdk.Aws.REGION
+                  }; then MGMT_BOOTSTRAPPED_HOME="no"; fi;
+                  if ! aws cloudformation describe-stacks --stack-name AWSAccelerator-CDKToolkit --region ${globalRegion}; then MGMT_BOOTSTRAPPED_GLOBAL="no"; fi;
+                  if [ "$MGMT_BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName AWSAccelerator-CDKToolkit aws://$MANAGEMENT_ACCOUNT_ID/${
                     cdk.Aws.REGION
                   } --qualifier accel; fi;
-                  if [ "$MGMT_BOOTSTRAPPED" = "no" ]; then yarn run cdk bootstrap --toolkitStackName AWSAccelerator-CDKToolkit aws://$MANAGEMENT_ACCOUNT_ID/${globalRegion} --qualifier accel; fi;
+                  if [ "$MGMT_BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName AWSAccelerator-CDKToolkit aws://$MANAGEMENT_ACCOUNT_ID/${globalRegion} --qualifier accel; fi;
                   unset AWS_ACCESS_KEY_ID;
                   unset AWS_SECRET_ACCESS_KEY;
                   unset AWS_SESSION_TOKEN;
@@ -574,6 +596,10 @@ export class InstallerStack extends cdk.Stack {
           AUDIT_ACCOUNT_EMAIL: {
             type: cdk.aws_codebuild.BuildEnvironmentVariableType.PLAINTEXT,
             value: this.auditAccountEmail.valueAsString,
+          },
+          CONTROL_TOWER_ENABLED: {
+            type: cdk.aws_codebuild.BuildEnvironmentVariableType.PLAINTEXT,
+            value: this.controlTowerEnabled.valueAsString,
           },
           ...targetAcceleratorEnvVariables,
           ...targetAcceleratorTestEnvVariables,

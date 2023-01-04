@@ -22,7 +22,9 @@ import {
   CreateControlTowerAccounts,
   CreateOrganizationAccounts,
   GetPortfolioId,
+  MoveAccounts,
   OrganizationalUnits,
+  ValidateScpCount,
 } from '@aws-accelerator/constructs';
 
 import { LoadAcceleratorConfigTable } from '../load-config-table';
@@ -33,12 +35,18 @@ import { AcceleratorStack, AcceleratorStackProps } from './accelerator-stack';
 export class PrepareStack extends AcceleratorStack {
   constructor(scope: Construct, id: string, props: AcceleratorStackProps) {
     super(scope, id, props);
+
+    let organizationAccounts: CreateOrganizationAccounts | undefined;
+    let controlTowerAccounts: CreateControlTowerAccounts | undefined;
+    let cloudwatchKey: cdk.aws_kms.Key;
+
     if (
       cdk.Stack.of(this).region === props.globalConfig.homeRegion &&
       cdk.Stack.of(this).account === props.accountsConfig.getManagementAccountId()
     ) {
-      Logger.debug(`[prepare-stack] homeRegion: ${props.globalConfig.homeRegion}`);
-      new cdk.aws_ssm.StringParameter(this, 'Parameter', {
+      Logger.info(`[prepare-stack] homeRegion: ${props.globalConfig.homeRegion}`);
+      this.ssmParameters.push({
+        logicalId: 'Parameter',
         parameterName: `/accelerator/prepare-stack/validate`,
         stringValue: 'value',
       });
@@ -96,23 +104,14 @@ export class PrepareStack extends AcceleratorStack {
         }),
       );
 
-      // Allow security/audit account access
-      key.addToResourcePolicy(
-        new cdk.aws_iam.PolicyStatement({
-          sid: 'auditAccount',
-          principals: [new cdk.aws_iam.AccountPrincipal(props.accountsConfig.getAuditAccountId())],
-          actions: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:Decrypt', 'kms:DescribeKey'],
-          resources: ['*'],
-        }),
-      );
-
-      new cdk.aws_ssm.StringParameter(this, 'AcceleratorManagementKmsArnParameter', {
+      this.ssmParameters.push({
+        logicalId: 'AcceleratorManagementKmsArnParameter',
         parameterName: '/accelerator/management/kms/key-arn',
         stringValue: key.keyArn,
       });
 
-      Logger.debug(`[prepare-stack] CloudWatch Encryption Key`);
-      const cloudwatchKey = new cdk.aws_kms.Key(this, 'AcceleratorManagementCloudWatchKey', {
+      Logger.info(`[prepare-stack] CloudWatch Encryption Key`);
+      cloudwatchKey = new cdk.aws_kms.Key(this, 'AcceleratorManagementCloudWatchKey', {
         alias: AcceleratorStack.ACCELERATOR_CLOUDWATCH_LOG_KEY_ALIAS,
         description: AcceleratorStack.ACCELERATOR_CLOUDWATCH_LOG_KEY_DESCRIPTION,
         enableKeyRotation: true,
@@ -138,12 +137,13 @@ export class PrepareStack extends AcceleratorStack {
         }),
       );
 
-      new cdk.aws_ssm.StringParameter(this, 'AcceleratorCloudWatchKmsArnParameter', {
+      this.ssmParameters.push({
+        logicalId: 'AcceleratorCloudWatchKmsArnParameter',
         parameterName: AcceleratorStack.ACCELERATOR_CLOUDWATCH_LOG_KEY_ARN_PARAMETER_NAME,
         stringValue: cloudwatchKey.keyArn,
       });
 
-      Logger.debug(`[prepare-stack] Lambda Encryption Key`);
+      Logger.info(`[prepare-stack] Lambda Encryption Key`);
       const lambdaKey = new cdk.aws_kms.Key(this, 'AcceleratorManagementLambdaKey', {
         alias: AcceleratorStack.ACCELERATOR_LAMBDA_KEY_ALIAS,
         description: AcceleratorStack.ACCELERATOR_LAMBDA_KEY_DESCRIPTION,
@@ -151,13 +151,14 @@ export class PrepareStack extends AcceleratorStack {
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       });
 
-      new cdk.aws_ssm.StringParameter(this, 'AcceleratorLambdaKmsArnParameter', {
+      this.ssmParameters.push({
+        logicalId: 'AcceleratorLambdaKmsArnParameter',
         parameterName: AcceleratorStack.ACCELERATOR_LAMBDA_KEY_ARN_PARAMETER_NAME,
         stringValue: lambdaKey.keyArn,
       });
 
       // Make assets from the configuration directory
-      Logger.debug(`[prepare-stack] Configuration assets creation`);
+      Logger.info(`[prepare-stack] Configuration assets creation`);
       const accountConfigAsset = new cdk.aws_s3_assets.Asset(this, 'AccountConfigAsset', {
         path: path.join(props.configDirPath, 'accounts-config.yaml'),
       });
@@ -205,6 +206,42 @@ export class PrepareStack extends AcceleratorStack {
           },
         ]);
 
+        new cdk.aws_ssm.StringParameter(this, 'ConfigTableArnParameter', {
+          parameterName: `/accelerator/prepare-stack/configTable/arn`,
+          stringValue: configTable.tableArn,
+        });
+
+        new cdk.aws_ssm.StringParameter(this, 'ConfigTableNameParameter', {
+          parameterName: `/accelerator/prepare-stack/configTable/name`,
+          stringValue: configTable.tableName,
+        });
+
+        new cdk.aws_iam.Role(this, 'AcceleratorMoveAccountRole', {
+          roleName: AcceleratorStack.ACCELERATOR_ACCOUNT_CONFIG_TABLE_PARAMETER_ACCESS_ROLE_NAME,
+          assumedBy: new cdk.aws_iam.AccountPrincipal(cdk.Stack.of(this).account),
+          inlinePolicies: {
+            default: new cdk.aws_iam.PolicyDocument({
+              statements: [
+                new cdk.aws_iam.PolicyStatement({
+                  effect: cdk.aws_iam.Effect.ALLOW,
+                  actions: ['ssm:GetParameters', 'ssm:GetParameter'],
+                  resources: [
+                    `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter/accelerator/prepare-stack/configTable/*`,
+                  ],
+                }),
+              ],
+            }),
+          },
+        });
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+        NagSuppressions.addResourceSuppressionsByPath(this, `${this.stackName}/AcceleratorMoveAccountRole/Resource`, [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason: 'CDK generated role',
+          },
+        ]);
+
         Logger.info(`[prepare-stack] Load Config Table`);
         const configRepoName = props.qualifier ? `${props.qualifier}-config` : 'aws-accelerator-config';
         const loadAcceleratorConfigTable = new LoadAcceleratorConfigTable(this, 'LoadAcceleratorConfigTable', {
@@ -235,10 +272,10 @@ export class PrepareStack extends AcceleratorStack {
           logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
         });
 
-        createOrganizationalUnits.node.addDependency(configTable);
         createOrganizationalUnits.node.addDependency(loadAcceleratorConfigTable);
 
         // Invite Accounts to Organization (GovCloud)
+        Logger.info(`[prepare-stack] Invite Accounts To OU`);
         const inviteAccountsToOu = new Account(this, 'InviteAccountsToOu', {
           acceleratorConfigTable: configTable,
           commitId: props.configCommitId || '',
@@ -246,10 +283,72 @@ export class PrepareStack extends AcceleratorStack {
           kmsKey: cloudwatchKey,
           logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
         });
-        inviteAccountsToOu.node.addDependency(loadAcceleratorConfigTable);
         inviteAccountsToOu.node.addDependency(createOrganizationalUnits);
 
+        // Move accounts to OU based on config
+        Logger.info(`[prepare-stack] Move Accounts To OU`);
+        const moveAccounts = new MoveAccounts(this, 'MoveAccounts', {
+          globalRegion: props.globalRegion ?? props.globalConfig.homeRegion,
+          configTable: configTable,
+          commitId: props.configCommitId || '',
+          managementAccountId: props.accountsConfig.getManagementAccountId(),
+          lambdaKmsKey: lambdaKey,
+          cloudWatchLogsKmsKey: cloudwatchKey,
+          cloudWatchLogRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
+          controlTower: props.globalConfig.controlTower.enable,
+        });
+        moveAccounts.node.addDependency(inviteAccountsToOu);
+        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies.
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/MoveAccounts/MoveAccountsFunction/ServiceRole/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM4',
+              reason: 'Custom resource lambda require access to other services',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies.
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/MoveAccounts/MoveAccountsProvider/framework-onEvent/ServiceRole/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM4',
+              reason: 'Custom resource lambda require access to other services',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/MoveAccounts/MoveAccountsFunction/ServiceRole/DefaultPolicy/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason: 'Custom resource lambda require access to other services',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/MoveAccounts/MoveAccountsProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason: 'Custom resource lambda require access to other services',
+            },
+          ],
+        );
+
+        Logger.info(`[prepare-stack] Tables`);
         if (props.partition == 'aws' || props.partition == 'aws-cn') {
+          Logger.info(`[prepare-stack] Create mapping table`);
           let govCloudAccountMappingTable: cdk.aws_dynamodb.ITable | undefined;
           Logger.info(`[prepare-stack] newOrgAccountsTable`);
           const newOrgAccountsTable = new cdk.aws_dynamodb.Table(this, 'NewOrgAccounts', {
@@ -287,7 +386,9 @@ export class PrepareStack extends AcceleratorStack {
             },
           ]);
 
-          new cdk.aws_ssm.StringParameter(this, 'NewCTAccountsTableNameParameter', {
+          Logger.info(`[prepare-stack] Table Parameter`);
+          this.ssmParameters.push({
+            logicalId: 'NewCTAccountsTableNameParameter',
             parameterName: `/accelerator/prepare-stack/NewCTAccountsTableName`,
             stringValue: newCTAccountsTable.tableName,
           });
@@ -302,13 +403,15 @@ export class PrepareStack extends AcceleratorStack {
               pointInTimeRecovery: true,
             });
 
-            new cdk.aws_ssm.StringParameter(this, 'GovCloudAccountMappingTableNameParameter', {
+            this.ssmParameters.push({
+              logicalId: 'GovCloudAccountMappingTableNameParameter',
               parameterName: `/accelerator/prepare-stack/govCloudAccountMappingTableName`,
               stringValue: govCloudAccountMappingTable.tableName,
             });
           }
 
-          new cdk.aws_ssm.StringParameter(this, 'NewOrgAccountsTableNameParameter', {
+          this.ssmParameters.push({
+            logicalId: 'NewOrgAccountsTableNameParameter',
             parameterName: `/accelerator/prepare-stack/NewOrgAccountsTableName`,
             stringValue: newOrgAccountsTable.tableName,
           });
@@ -319,6 +422,7 @@ export class PrepareStack extends AcceleratorStack {
             newOrgAccountsTable: newOrgAccountsTable,
             newCTAccountsTable: newCTAccountsTable,
             controlTowerEnabled: props.globalConfig.controlTower.enable,
+            organizationsEnabled: props.organizationConfig.enable,
             commitId: loadAcceleratorConfigTable.id,
             stackName: cdk.Stack.of(this).stackName,
             region: cdk.Stack.of(this).region,
@@ -330,12 +434,10 @@ export class PrepareStack extends AcceleratorStack {
             driftDetectionMessageParameter: driftMessageParameter,
           });
 
-          validation.node.addDependency(loadAcceleratorConfigTable);
-          validation.node.addDependency(createOrganizationalUnits);
-          validation.node.addDependency(inviteAccountsToOu);
+          validation.node.addDependency(moveAccounts);
 
           Logger.info(`[prepare-stack] Create new organization accounts`);
-          const organizationAccounts = new CreateOrganizationAccounts(this, 'CreateOrganizationAccounts', {
+          organizationAccounts = new CreateOrganizationAccounts(this, 'CreateOrganizationAccounts', {
             newOrgAccountsTable: newOrgAccountsTable,
             govCloudAccountMappingTable: govCloudAccountMappingTable,
             accountRoleName: props.globalConfig.managementAccountAccessRole,
@@ -376,6 +478,16 @@ export class PrepareStack extends AcceleratorStack {
           }
 
           if (props.globalConfig.controlTower.enable) {
+            // Allow security/audit account access
+            key.addToResourcePolicy(
+              new cdk.aws_iam.PolicyStatement({
+                sid: 'auditAccount',
+                principals: [new cdk.aws_iam.AccountPrincipal(props.accountsConfig.getAuditAccountId())],
+                actions: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:Decrypt', 'kms:DescribeKey'],
+                resources: ['*'],
+              }),
+            );
+
             Logger.info(`[prepare-stack] Get Portfolio Id`);
             const portfolioResults = new GetPortfolioId(this, 'GetPortFolioId', {
               displayName: 'AWS Control Tower Account Factory Portfolio',
@@ -384,7 +496,7 @@ export class PrepareStack extends AcceleratorStack {
               logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
             });
             Logger.info(`[prepare-stack] Create new control tower accounts`);
-            const controlTowerAccounts = new CreateControlTowerAccounts(this, 'CreateCTAccounts', {
+            controlTowerAccounts = new CreateControlTowerAccounts(this, 'CreateCTAccounts', {
               table: newCTAccountsTable,
               portfolioId: portfolioResults.portfolioId,
               kmsKey: cloudwatchKey,
@@ -568,8 +680,132 @@ export class PrepareStack extends AcceleratorStack {
           }
         }
       }
+      Logger.info(`[prepare-stack] SCP Validation`);
+      const scpValidateInput = this.validateScp();
+      // cannot add 5 scps from console or cli externally.
+      // LZA needs to have some value in configScps - which are scps from config file
+      // putting an if condition here to only create custom resource; optimize performance
+      if (scpValidateInput.configScps.length) {
+        const validateScp = new ValidateScpCount(this, 'ValidateScpCount', {
+          organizationUnits: scpValidateInput.configOu,
+          accounts: scpValidateInput.configAccounts,
+          scps: scpValidateInput.configScps,
+          kmsKey: cloudwatchKey,
+          logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
+        });
+
+        if (controlTowerAccounts) {
+          validateScp.node.addDependency(controlTowerAccounts);
+        }
+        if (organizationAccounts) {
+          validateScp.node.addDependency(organizationAccounts);
+        }
+      }
     }
+    //
+    // Create SSM Parameters
+    //
+    this.createSsmParameters();
 
     Logger.info('[prepare-stack] Completed stack synthesis');
+  }
+
+  /*
+   * Function to parse accounts, Organization Units and Service Control Policies
+   * Validate the config input and fail if SCP count > 5
+   * Output of this function will populate a custom resource
+   */
+  private validateScp() {
+    type accountOutputItem = {
+      accountId: string;
+      name: string;
+    };
+    type orgOutputItem = {
+      id: string;
+      name: string;
+    };
+
+    type validateScpItem = {
+      orgEntity: string;
+      orgEntityType: string;
+      orgEntityId: string;
+      appliedScpName: string[];
+    };
+
+    Logger.info('[prepare-stack] Validate SCP Count');
+
+    // Get all account and organization unit for custom resource
+    const accounts: accountOutputItem[] = [];
+    const orgUnits: orgOutputItem[] = [];
+
+    // Get all accelerator applied scps in one place for custom resource
+    const validateScpCountForOrg: validateScpItem[] = [];
+
+    for (const scpItem of this.props.organizationConfig.serviceControlPolicies) {
+      const orgArray = scpItem.deploymentTargets.organizationalUnits ?? [];
+      const accountArray = scpItem.deploymentTargets.accounts ?? [];
+
+      //only check scp that is being applied to either account or orgUnit
+      if (orgArray.length > 0 || accountArray.length > 0) {
+        for (const orgUnitScp of orgArray) {
+          //check in array to see if OU is already there
+          const index = validateScpCountForOrg.map(object => object.orgEntity).indexOf(orgUnitScp);
+          if (index > -1) {
+            validateScpCountForOrg[index].appliedScpName.push(scpItem.name);
+          } else {
+            let orgUnitId = '';
+            try {
+              orgUnitId = this.props.organizationConfig.getOrganizationalUnitId(orgUnitScp);
+            } catch (error) {
+              let message;
+              if (error instanceof Error) message = error.message;
+              else message = String(error);
+
+              if (message.startsWith('Organizations not enabled or')) continue;
+              else throw error;
+            }
+            validateScpCountForOrg.push({
+              orgEntity: orgUnitScp,
+              orgEntityType: 'OU',
+              orgEntityId: orgUnitId,
+              appliedScpName: [scpItem.name],
+            });
+          }
+        }
+        for (const acc of accountArray) {
+          //check in array to see if OU is already there
+          const index = validateScpCountForOrg.map(object => object.orgEntity).indexOf(acc);
+          if (index > -1) {
+            validateScpCountForOrg[index].appliedScpName.push(scpItem.name);
+          } else {
+            validateScpCountForOrg.push({
+              orgEntity: acc,
+              orgEntityType: 'Account',
+              orgEntityId: this.props.accountsConfig.getAccountId(acc),
+              appliedScpName: [scpItem.name],
+            });
+          }
+        }
+      }
+    }
+
+    const allAccounts = [...this.props.accountsConfig.mandatoryAccounts, ...this.props.accountsConfig.workloadAccounts];
+    for (const accountItem of allAccounts) {
+      try {
+        accounts.push({ accountId: this.props.accountsConfig.getAccountId(accountItem.name), name: accountItem.name });
+      } catch (e) {
+        Logger.info(`[prepare-stack] Account ${accountItem.name} not found to validate scp count.`);
+      }
+    }
+
+    for (const orgItem of this.props.organizationConfig.organizationalUnitIds!) {
+      try {
+        orgUnits.push({ id: orgItem.id, name: orgItem.name });
+      } catch (e) {
+        Logger.info(`[prepare-stack] Organization ${orgItem.name} not found to validate scp count.`);
+      }
+    }
+
+    return { configAccounts: accounts, configOu: orgUnits, configScps: validateScpCountForOrg };
   }
 }

@@ -30,21 +30,28 @@ import {
   VpcConfig,
   VpcFlowLogsConfig,
   VpcTemplatesConfig,
+  CertificateConfig,
 } from '@aws-accelerator/config';
 import {
+  ApplicationLoadBalancer,
   DeleteDefaultVpc,
   DhcpOptions,
   GatewayLoadBalancer,
   NatGateway,
   NetworkAcl,
+  NetworkLoadBalancer,
   PrefixList,
   RouteTable,
   SecurityGroup,
   SecurityGroupEgressRuleProps,
   SecurityGroupIngressRuleProps,
+  SsmParameterLookup,
   Subnet,
   TransitGatewayAttachment,
+  TransitGatewayPeering,
   Vpc,
+  VpnConnection,
+  CreateCertificate,
 } from '@aws-accelerator/constructs';
 
 import { Logger } from '../logger';
@@ -85,7 +92,6 @@ export class NetworkVpcStack extends AcceleratorStack {
     // Set private properties
     this.accountsConfig = props.accountsConfig;
     this.logRetention = props.globalConfig.cloudwatchLogRetentionInDays;
-
     this.cloudwatchKey = cdk.aws_kms.Key.fromKeyArn(
       this,
       'AcceleratorGetCloudWatchKey',
@@ -94,6 +100,14 @@ export class NetworkVpcStack extends AcceleratorStack {
         AcceleratorStack.ACCELERATOR_CLOUDWATCH_LOG_KEY_ARN_PARAMETER_NAME,
       ),
     ) as cdk.aws_kms.Key;
+    //
+    // Create ACM Certificates
+    //
+    this.createCertificates();
+    //
+    // Create Transit Gateway peering
+    //
+    this.createTransitGatewayPeering();
 
     //
     // Set IPAM map
@@ -302,95 +316,9 @@ export class NetworkVpcStack extends AcceleratorStack {
     }
 
     //
-    // Loop through VPC peering entries. Determine if accepter VPC is in external account.
-    // Add VPC peering role to external account IDs if necessary
+    // Create VPC peering cross-account role, if required
     //
-    const vpcPeeringAccountIds: string[] = [];
-    for (const peering of props.networkConfig.vpcPeering ?? []) {
-      // Check to ensure only two VPCs are defined
-      if (peering.vpcs.length > 2) {
-        throw new Error(`[network-vpc-stack] VPC peering connection ${peering.name} has more than two VPCs defined`);
-      }
-
-      // Get requester and accepter VPC configurations
-      const requesterVpc = props.networkConfig.vpcs.filter(item => item.name === peering.vpcs[0]);
-      const accepterVpc = props.networkConfig.vpcs.filter(item => item.name === peering.vpcs[1]);
-
-      if (requesterVpc.length === 1 && accepterVpc.length === 1) {
-        const requesterAccountId = props.accountsConfig.getAccountId(requesterVpc[0].account);
-        const accepterAccountId = props.accountsConfig.getAccountId(accepterVpc[0].account);
-
-        // Check for different account peering -- only add IAM role to accepter account
-        if (cdk.Stack.of(this).account === accepterAccountId && cdk.Stack.of(this).region === accepterVpc[0].region) {
-          if (requesterAccountId !== accepterAccountId && !vpcPeeringAccountIds.includes(requesterAccountId)) {
-            vpcPeeringAccountIds.push(requesterAccountId);
-          }
-        }
-      } else if (requesterVpc.length === 0) {
-        throw new Error(`[network-vpc-stack] Requester VPC ${peering.vpcs[0]} is undefined`);
-      } else if (accepterVpc.length === 0) {
-        throw new Error(`[network-vpc-stack] Accepter VPC ${peering.vpcs[1]} is undefined`);
-      } else {
-        throw new Error(`[network-vpc-stack] network-config.yaml cannot contain VPCs with the same name`);
-      }
-    }
-
-    //
-    // Create VPC peering role
-    //
-    if (vpcPeeringAccountIds.length > 0) {
-      Logger.info(`[network-vpc-stack] Create cross-account IAM role for VPC peering`);
-
-      const principals: cdk.aws_iam.PrincipalBase[] = [];
-      vpcPeeringAccountIds.forEach(accountId => {
-        principals.push(new cdk.aws_iam.AccountPrincipal(accountId));
-      });
-      new cdk.aws_iam.Role(this, 'VpcPeeringRole', {
-        roleName: `AWSAccelerator-VpcPeeringRole-${cdk.Stack.of(this).region}`,
-        assumedBy: new cdk.aws_iam.CompositePrincipal(...principals),
-        inlinePolicies: {
-          default: new cdk.aws_iam.PolicyDocument({
-            statements: [
-              new cdk.aws_iam.PolicyStatement({
-                effect: cdk.aws_iam.Effect.ALLOW,
-                actions: [
-                  'ec2:AcceptVpcPeeringConnection',
-                  'ec2:CreateVpcPeeringConnection',
-                  'ec2:DeleteVpcPeeringConnection',
-                ],
-                resources: [
-                  `arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:vpc/*`,
-                  `arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:vpc-peering-connection/*`,
-                ],
-              }),
-              new cdk.aws_iam.PolicyStatement({
-                effect: cdk.aws_iam.Effect.ALLOW,
-                actions: ['ssm:DeleteParameter', 'ssm:PutParameter'],
-                resources: [
-                  `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter/accelerator/network/vpcPeering/*`,
-                ],
-              }),
-              new cdk.aws_iam.PolicyStatement({
-                effect: cdk.aws_iam.Effect.ALLOW,
-                actions: ['ssm:GetParameter'],
-                resources: [
-                  `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter/accelerator/network/vpc/*`,
-                ],
-              }),
-            ],
-          }),
-        },
-      });
-
-      // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
-      // rule suppression with evidence for this permission.
-      NagSuppressions.addResourceSuppressionsByPath(this, `${this.stackName}/VpcPeeringRole/Resource`, [
-        {
-          id: 'AwsSolutions-IAM5',
-          reason: 'VpcPeeringRole needs access to create peering connections for VPCs in the account ',
-        },
-      ]);
-    }
+    this.createVpcPeeringRole(props);
 
     //
     // Create DHCP options
@@ -451,7 +379,8 @@ export class NetworkVpcStack extends AcceleratorStack {
 
         prefixListMap.set(prefixListItem.name, prefixList);
 
-        new cdk.aws_ssm.StringParameter(this, pascalCase(`SsmParam${pascalCase(prefixListItem.name)}PrefixList`), {
+        this.ssmParameters.push({
+          logicalId: pascalCase(`SsmParam${pascalCase(prefixListItem.name)}PrefixList`),
           parameterName: `/accelerator/network/prefixList/${prefixListItem.name}/id`,
           stringValue: prefixList.prefixListId,
         });
@@ -461,7 +390,6 @@ export class NetworkVpcStack extends AcceleratorStack {
     //
     // Evaluate VPC entries
     //
-
     for (const vpcItem of [...props.networkConfig.vpcs, ...(props.networkConfig.vpcTemplates ?? [])] ?? []) {
       // Get account IDs
       const vpcAccountIds = this.getVpcAccountIds(vpcItem);
@@ -475,11 +403,9 @@ export class NetworkVpcStack extends AcceleratorStack {
         let cidr: string | undefined = undefined;
         let poolId: string | undefined = undefined;
         let poolNetmask: number | undefined = undefined;
-        if (NetworkConfigTypes.vpcConfig.is(vpcItem)) {
-          // Get first CIDR in array
-          if (vpcItem.cidrs) {
-            cidr = vpcItem.cidrs[0];
-          }
+        // Get first CIDR in array
+        if (vpcItem.cidrs) {
+          cidr = vpcItem.cidrs[0];
         }
 
         // Get IPAM details
@@ -496,6 +422,7 @@ export class NetworkVpcStack extends AcceleratorStack {
         //
         // Create the VPC
         //
+        //Set the VGW ID to the VPC ID
         const vpc = new Vpc(this, pascalCase(`${vpcItem.name}Vpc`), {
           name: vpcItem.name,
           ipv4CidrBlock: cidr,
@@ -507,19 +434,19 @@ export class NetworkVpcStack extends AcceleratorStack {
           ipv4IpamPoolId: poolId,
           ipv4NetmaskLength: poolNetmask,
           tags: vpcItem.tags,
+          virtualPrivateGateway: vpcItem.virtualPrivateGateway,
         });
-        new cdk.aws_ssm.StringParameter(this, pascalCase(`SsmParam${pascalCase(vpcItem.name)}VpcId`), {
+        this.ssmParameters.push({
+          logicalId: pascalCase(`SsmParam${pascalCase(vpcItem.name)}VpcId`),
           parameterName: `/accelerator/network/vpc/${vpcItem.name}/id`,
           stringValue: vpc.vpcId,
         });
 
         // Create additional CIDRs or IPAM allocations as needed
-        if (NetworkConfigTypes.vpcConfig.is(vpcItem)) {
-          if (vpcItem.cidrs && vpcItem.cidrs.length > 1) {
-            for (const vpcCidr of vpcItem.cidrs.slice(1)) {
-              Logger.info(`[network-vpc-stack] Adding secondary CIDR ${vpcCidr} to VPC ${vpcItem.name}`);
-              vpc.addCidr({ cidrBlock: vpcCidr });
-            }
+        if (vpcItem.cidrs && vpcItem.cidrs.length > 1) {
+          for (const vpcCidr of vpcItem.cidrs.slice(1)) {
+            Logger.info(`[network-vpc-stack] Adding secondary CIDR ${vpcCidr} to VPC ${vpcItem.name}`);
+            vpc.addCidr({ cidrBlock: vpcCidr });
           }
         }
 
@@ -536,6 +463,10 @@ export class NetworkVpcStack extends AcceleratorStack {
           }
         }
 
+        // Set the virtual private gateway map
+        if (vpc.virtualPrivateGateway) {
+          this.createVpnConnection(vpc);
+        }
         //
         // Tag the VPC if central endpoints are enabled. These tags are used to
         // identify which VPCs in a target account to create private hosted zone
@@ -591,20 +522,16 @@ export class NetworkVpcStack extends AcceleratorStack {
         // Create Route Table SSM Parameters
         //
         for (const [routeTableName, routeTableInfo] of routeTableMap) {
-          new cdk.aws_ssm.StringParameter(
-            this,
-            pascalCase(`SsmParam${pascalCase(vpcItem.name)}${pascalCase(routeTableName)}RouteTableId`),
-            {
-              parameterName: `/accelerator/network/vpc/${vpcItem.name}/routeTable/${routeTableName}/id`,
-              stringValue: routeTableInfo.routeTableId,
-            },
-          );
+          this.ssmParameters.push({
+            logicalId: pascalCase(`SsmParam${pascalCase(vpcItem.name)}${pascalCase(routeTableName)}RouteTableId`),
+            parameterName: `/accelerator/network/vpc/${vpcItem.name}/routeTable/${routeTableName}/id`,
+            stringValue: routeTableInfo.routeTableId,
+          });
         }
 
         //
         // Create Subnets
         //
-
         const subnetMap = new Map<string, Subnet>();
         const ipamSubnetMap = new Map<number, Subnet>();
 
@@ -673,14 +600,16 @@ export class NetworkVpcStack extends AcceleratorStack {
           });
 
           subnetMap.set(subnetItem.name, subnet);
-          new cdk.aws_ssm.StringParameter(
-            this,
-            pascalCase(`SsmParam${pascalCase(vpcItem.name) + pascalCase(subnetItem.name)}SubnetId`),
-            {
-              parameterName: `/accelerator/network/vpc/${vpcItem.name}/subnet/${subnetItem.name}/id`,
-              stringValue: subnet.subnetId,
-            },
-          );
+          this.ssmParameters.push({
+            logicalId: pascalCase(`SsmParam${pascalCase(vpcItem.name) + pascalCase(subnetItem.name)}SubnetId`),
+            parameterName: `/accelerator/network/vpc/${vpcItem.name}/subnet/${subnetItem.name}/id`,
+            stringValue: subnet.subnetId,
+          });
+
+          // If the VPC has additional CIDR blocks, depend on those CIDRs to be associated
+          for (const cidr of vpc.cidrs ?? []) {
+            subnet.node.addDependency(cidr);
+          }
 
           // Need to ensure IPAM subnets are created one at a time to avoid duplicate allocations
           // Add dependency on previously-created IPAM subnet, if it exists
@@ -728,14 +657,11 @@ export class NetworkVpcStack extends AcceleratorStack {
             },
           );
           natGatewayMap.set(natGatewayItem.name, natGateway);
-          new cdk.aws_ssm.StringParameter(
-            this,
-            pascalCase(`SsmParam${pascalCase(vpcItem.name) + pascalCase(natGatewayItem.name)}NatGatewayId`),
-            {
-              parameterName: `/accelerator/network/vpc/${vpcItem.name}/natGateway/${natGatewayItem.name}/id`,
-              stringValue: natGateway.natGatewayId,
-            },
-          );
+          this.ssmParameters.push({
+            logicalId: pascalCase(`SsmParam${pascalCase(vpcItem.name) + pascalCase(natGatewayItem.name)}NatGatewayId`),
+            parameterName: `/accelerator/network/vpc/${vpcItem.name}/natGateway/${natGatewayItem.name}/id`,
+            stringValue: natGateway.natGatewayId,
+          });
         }
 
         //
@@ -775,16 +701,13 @@ export class NetworkVpcStack extends AcceleratorStack {
             },
           );
           transitGatewayAttachments.set(tgwAttachmentItem.transitGateway.name, attachment);
-          new cdk.aws_ssm.StringParameter(
-            this,
-            pascalCase(
+          this.ssmParameters.push({
+            logicalId: pascalCase(
               `SsmParam${pascalCase(vpcItem.name) + pascalCase(tgwAttachmentItem.name)}TransitGatewayAttachmentId`,
             ),
-            {
-              parameterName: `/accelerator/network/vpc/${vpcItem.name}/transitGatewayAttachment/${tgwAttachmentItem.name}/id`,
-              stringValue: attachment.transitGatewayAttachmentId,
-            },
-          );
+            parameterName: `/accelerator/network/vpc/${vpcItem.name}/transitGatewayAttachment/${tgwAttachmentItem.name}/id`,
+            stringValue: attachment.transitGatewayAttachmentId,
+          });
         }
 
         //
@@ -802,7 +725,7 @@ export class NetworkVpcStack extends AcceleratorStack {
               pascalCase(`${vpcItem.name}Vpc`) +
               pascalCase(`${routeTableItem.name}RouteTable`) +
               pascalCase(routeTableEntryItem.name);
-            const entryTypes = ['transitGateway', 'internetGateway', 'natGateway'];
+            const entryTypes = ['transitGateway', 'internetGateway', 'natGateway', 'virtualPrivateGateway'];
 
             // Check if using a prefix list or CIDR as the destination
             if (routeTableEntryItem.type && entryTypes.includes(routeTableEntryItem.type)) {
@@ -878,6 +801,20 @@ export class NetworkVpcStack extends AcceleratorStack {
                   this.logRetention,
                 );
               }
+
+              // Route: Virtual Private Gateway
+              if (routeTableEntryItem.type === 'virtualPrivateGateway') {
+                Logger.info(
+                  `[network-vpc-stack] Adding Virtual Private Gateway Route Table Entry ${routeTableEntryItem.name}`,
+                );
+                routeTable.addVirtualPrivateGatewayRoute(
+                  routeId,
+                  destination,
+                  destinationPrefixListId,
+                  this.cloudwatchKey,
+                  this.logRetention,
+                );
+              }
             }
           }
         }
@@ -890,6 +827,7 @@ export class NetworkVpcStack extends AcceleratorStack {
         for (const securityGroupItem of vpcItem.securityGroups ?? []) {
           const processedIngressRules: SecurityGroupIngressRuleProps[] = [];
           const processedEgressRules: SecurityGroupEgressRuleProps[] = [];
+          let allIngressRule = false;
 
           Logger.info(`[network-vpc-stack] Adding rules to ${securityGroupItem.name}`);
 
@@ -915,6 +853,9 @@ export class NetworkVpcStack extends AcceleratorStack {
                 });
               } else {
                 processedIngressRules.push({ ...ingressRule });
+                if (ingressRule.cidrIp && ingressRule.cidrIp === '0.0.0.0/0') {
+                  allIngressRule = true;
+                }
               }
             }
           }
@@ -958,14 +899,20 @@ export class NetworkVpcStack extends AcceleratorStack {
           );
           securityGroupMap.set(securityGroupItem.name, securityGroup);
 
-          new cdk.aws_ssm.StringParameter(
-            this,
-            pascalCase(`SsmParam${pascalCase(vpcItem.name) + pascalCase(securityGroupItem.name)}SecurityGroup`),
-            {
-              parameterName: `/accelerator/network/vpc/${vpcItem.name}/securityGroup/${securityGroupItem.name}/id`,
-              stringValue: securityGroup.securityGroupId,
-            },
-          );
+          this.ssmParameters.push({
+            logicalId: pascalCase(
+              `SsmParam${pascalCase(vpcItem.name) + pascalCase(securityGroupItem.name)}SecurityGroup`,
+            ),
+            parameterName: `/accelerator/network/vpc/${vpcItem.name}/securityGroup/${securityGroupItem.name}/id`,
+            stringValue: securityGroup.securityGroupId,
+          });
+
+          // AwsSolutions-EC23: The Security Group allows for 0.0.0.0/0 or ::/0 inbound access.
+          if (allIngressRule) {
+            NagSuppressions.addResourceSuppressions(securityGroup, [
+              { id: 'AwsSolutions-EC23', reason: 'User defined an all ingress rule in configuration.' },
+            ]);
+          }
         }
 
         // Add security group references
@@ -1056,14 +1003,11 @@ export class NetworkVpcStack extends AcceleratorStack {
             true,
           );
 
-          new cdk.aws_ssm.StringParameter(
-            this,
-            pascalCase(`SsmParam${pascalCase(vpcItem.name)}${pascalCase(naclItem.name)}Nacl`),
-            {
-              parameterName: `/accelerator/network/vpc/${vpcItem.name}/networkAcl/${naclItem.name}/id`,
-              stringValue: networkAcl.networkAclId,
-            },
-          );
+          this.ssmParameters.push({
+            logicalId: pascalCase(`SsmParam${pascalCase(vpcItem.name)}${pascalCase(naclItem.name)}Nacl`),
+            parameterName: `/accelerator/network/vpc/${vpcItem.name}/networkAcl/${naclItem.name}/id`,
+            stringValue: networkAcl.networkAclId,
+          });
 
           for (const subnetItem of naclItem.subnetAssociations) {
             Logger.info(`[network-vpc-stack] Associate ${naclItem.name} to subnet ${subnetItem}`);
@@ -1159,11 +1103,167 @@ export class NetworkVpcStack extends AcceleratorStack {
             this.createGatewayLoadBalancer(loadBalancerItem, subnetMap);
           }
         }
+
+        //
+        // Create NLBs
+        //
+        this.createNetworkLoadBalancers(vpcItem, subnetMap);
+
+        this.createApplicationLoadBalancers(vpcItem, subnetMap, securityGroupMap);
       }
     }
+
+    //
+    // Create SSM Parameters
+    //
+    this.createSsmParameters();
+
     Logger.info('[network-vpc-stack] Completed stack synthesis');
   }
 
+  private createNetworkLoadBalancers(vpcItem: VpcConfig | VpcTemplatesConfig, subnetMap: Map<string, Subnet>) {
+    // Get account IDs
+    if (!vpcItem.loadBalancers?.networkLoadBalancers || vpcItem.loadBalancers.networkLoadBalancers.length === 0) {
+      return;
+    }
+    const vpcItemsWithTargetGroups = this.props.networkConfig.vpcs.filter(
+      vpcItem => vpcItem.targetGroups && vpcItem.targetGroups.length > 0,
+    );
+    const vpcTemplatesWithTargetGroups =
+      this.props.networkConfig.vpcTemplates?.filter(
+        vpcItem => vpcItem.targetGroups && vpcItem.targetGroups.length > 0,
+      ) ?? [];
+    const accountIdTargetsForVpcs = vpcItemsWithTargetGroups.map(vpcItem =>
+      this.props.accountsConfig.getAccountId(vpcItem.account),
+    );
+    const accountIdTargetsForVpcTemplates =
+      vpcTemplatesWithTargetGroups?.map(vpcTemplate =>
+        this.getAccountIdsFromDeploymentTarget(vpcTemplate.deploymentTargets),
+      ) ?? [];
+    const principalAccountIds = [...accountIdTargetsForVpcs, ...accountIdTargetsForVpcTemplates];
+    principalAccountIds.push(cdk.Stack.of(this).account);
+    const principalIds = [...new Set(principalAccountIds)];
+    const principals = principalIds.map(accountId => new cdk.aws_iam.AccountPrincipal(accountId)) ?? undefined;
+
+    const accessLogsBucket = `aws-accelerator-elb-access-logs-${this.props.accountsConfig.getLogArchiveAccountId()}-${
+      cdk.Stack.of(this).region
+    }`;
+
+    for (const nlbItem of vpcItem.loadBalancers?.networkLoadBalancers || []) {
+      const subnetLookups = nlbItem.subnets.map(subnetName => subnetMap.get(subnetName));
+      const nonNullsubnets = subnetLookups.filter(subnet => subnet) as Subnet[];
+      const subnetIds = nonNullsubnets.map(subnet => subnet.subnetId);
+      if (subnetIds.length === 0) {
+        throw new Error(`Could not find subnets for NLB Item ${nlbItem.name}`);
+      }
+      const nlb = new NetworkLoadBalancer(this, `${nlbItem.name}-${vpcItem.name}`, {
+        name: nlbItem.name,
+        appName: `${nlbItem.name}-${vpcItem.name}-app`,
+        subnets: subnetIds,
+        vpcName: vpcItem.name,
+        scheme: nlbItem.scheme,
+        deletionProtection: nlbItem.deletionProtection,
+        crossZoneLoadBalancing: nlbItem.crossZoneLoadBalancing,
+        accessLogsBucket,
+      });
+      for (const subnet of nlbItem.subnets || []) {
+        const subnetLookup = subnetMap.get(subnet);
+        if (subnetLookup) {
+          nlb.node.addDependency(subnetLookup);
+        }
+      }
+
+      this.ssmParameters.push({
+        logicalId: `${nlbItem.name}-${vpcItem.name}-ssm`,
+        parameterName: `/accelerator/network/vpc/${vpcItem.name}/nlb/${nlbItem.name}/id`,
+        stringValue: nlb.networkLoadBalancerArn,
+      });
+    }
+
+    if (
+      cdk.Stack.of(this).region === this.props.globalConfig.homeRegion &&
+      vpcItem.loadBalancers?.networkLoadBalancers &&
+      vpcItem.loadBalancers?.networkLoadBalancers.length > 0
+    ) {
+      new cdk.aws_iam.Role(this, `GetNLBIPAddressLookup`, {
+        roleName: `AWSAccelerator-GetNLBIPAddressLookup`,
+        assumedBy: new cdk.aws_iam.CompositePrincipal(...principals),
+        inlinePolicies: {
+          default: new cdk.aws_iam.PolicyDocument({
+            statements: [
+              new cdk.aws_iam.PolicyStatement({
+                effect: cdk.aws_iam.Effect.ALLOW,
+                actions: ['ec2:DescribeNetworkInterfaces'],
+                resources: ['*'],
+              }),
+            ],
+          }),
+        },
+      });
+
+      NagSuppressions.addResourceSuppressionsByPath(this, `/${this.stackName}/GetNLBIPAddressLookup`, [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'Allows only specific role arns.',
+        },
+      ]);
+    }
+  }
+
+  private createApplicationLoadBalancers(
+    vpcItem: VpcConfig | VpcTemplatesConfig,
+    subnetMap: Map<string, Subnet>,
+    securityGroupMap: Map<string, SecurityGroup>,
+  ) {
+    const accessLogsBucket = `aws-accelerator-elb-access-logs-${this.props.accountsConfig.getLogArchiveAccountId()}-${
+      cdk.Stack.of(this).region
+    }`;
+
+    for (const albItem of vpcItem.loadBalancers?.applicationLoadBalancers || []) {
+      const subnetLookups = albItem.subnets.map(subnetName => subnetMap.get(subnetName));
+      const nonNullsubnets = subnetLookups.filter(subnet => subnet) as Subnet[];
+      const subnetIds = nonNullsubnets.map(subnet => subnet.subnetId);
+      const securityGroupLookups = albItem.securityGroups.map(securityGroupName =>
+        securityGroupMap.get(securityGroupName),
+      );
+      const nonNullSecurityGroups = securityGroupLookups.filter(group => group) as SecurityGroup[];
+      const securityGroupIds = nonNullSecurityGroups.map(securityGroup => securityGroup.securityGroupId);
+      if (subnetIds.length === 0) {
+        throw new Error(`Could not find subnets for ALB Item ${albItem.name}`);
+      }
+      const alb = new ApplicationLoadBalancer(this, `${albItem.name}-${vpcItem.name}`, {
+        name: albItem.name,
+        subnets: subnetIds,
+        securityGroups: securityGroupIds ?? undefined,
+        scheme: albItem.scheme ?? 'internal',
+        accessLogsBucket,
+        attributes: albItem.attributes ?? undefined,
+      });
+      for (const subnet of albItem.subnets || []) {
+        const subnetLookup = subnetMap.get(subnet);
+        if (subnetLookup) {
+          alb.node.addDependency(subnetLookup);
+        }
+      }
+      for (const subnet of subnetLookups || []) {
+        if (subnet) {
+          alb.node.addDependency(subnet);
+        }
+      }
+
+      for (const securityGroup of securityGroupLookups || []) {
+        if (securityGroup) {
+          alb.node.addDependency(securityGroup);
+        }
+      }
+
+      this.ssmParameters.push({
+        logicalId: `${albItem.name}-${vpcItem.name}-ssm`,
+        parameterName: `/accelerator/network/vpc/${vpcItem.name}/alb/${albItem.name}/id`,
+        stringValue: alb.applicationLoadBalancerArn,
+      });
+    }
+  }
   private processNetworkAclTarget(target: string | NetworkAclSubnetSelection): {
     cidrBlock?: string;
     ipv6CidrBlock?: string;
@@ -1489,10 +1589,18 @@ export class NetworkVpcStack extends AcceleratorStack {
       deletionProtection: loadBalancerItem.deletionProtection,
       tags: loadBalancerItem.tags,
     });
-    new cdk.aws_ssm.StringParameter(this, pascalCase(`SsmParam${pascalCase(loadBalancerItem.name)}GwlbServiceId`), {
-      parameterName: `/accelerator/network/gwlb/${loadBalancerItem.name}/endpointService/id`,
-      stringValue: loadBalancer.endpointServiceId,
-    });
+    this.ssmParameters.push(
+      {
+        logicalId: pascalCase(`SsmParam${pascalCase(loadBalancerItem.name)}GwlbServiceId`),
+        parameterName: `/accelerator/network/gwlb/${loadBalancerItem.name}/endpointService/id`,
+        stringValue: loadBalancer.endpointServiceId,
+      },
+      {
+        logicalId: pascalCase(`SsmParam${pascalCase(loadBalancerItem.name)}GwlbArn`),
+        parameterName: `/accelerator/network/gwlb/${loadBalancerItem.name}/arn`,
+        stringValue: loadBalancer.loadBalancerArn,
+      },
+    );
 
     // AwsSolutions-ELB2: The ELB does not have access logs enabled.
     NagSuppressions.addResourceSuppressions(loadBalancer, [
@@ -1604,6 +1712,31 @@ export class NetworkVpcStack extends AcceleratorStack {
     });
   }
 
+  // Create Vpn Connections for Virtual Private Gateways
+  private createVpnConnection(vpc: Vpc) {
+    for (const cgw of this.props.networkConfig.customerGateways ?? []) {
+      for (const vpnConnection of cgw.vpnConnections ?? []) {
+        if (vpnConnection.vpc === vpc.name) {
+          const customerGatewayId = cdk.aws_ssm.StringParameter.valueForStringParameter(
+            this,
+            `/accelerator/network/customerGateways/${cgw.name}/id`,
+          );
+          const virtualPrivateGatewayId = vpc.virtualPrivateGateway!.gatewayId;
+          Logger.info(
+            `[network-vpc-stack] Creating Vpn Connection with Customer Gateway ${cgw.name} to the VPC ${vpnConnection.vpc}`,
+          );
+          new VpnConnection(this, pascalCase(`${vpnConnection.vpc}-VgwVpnConnection`), {
+            name: vpnConnection.name,
+            customerGatewayId: customerGatewayId,
+            staticRoutesOnly: vpnConnection.staticRoutesOnly,
+            tags: vpnConnection.tags,
+            virtualPrivateGateway: virtualPrivateGatewayId,
+            vpnTunnelOptionsSpecifications: vpnConnection.tunnelSpecifications,
+          });
+        }
+      }
+    }
+  }
   /**
    * Set IPAM pool map
    * @param props
@@ -1645,5 +1778,277 @@ export class NetworkVpcStack extends AcceleratorStack {
       }
     }
     return poolMap;
+  }
+
+  /**
+   * Function to create TGW peering
+   */
+  private createTransitGatewayPeering() {
+    for (const transitGatewayPeeringItem of this.props.networkConfig.transitGatewayPeering ?? []) {
+      if (
+        this.props.accountsConfig.getAccountId(transitGatewayPeeringItem.requester.account) ===
+          cdk.Stack.of(this).account &&
+        transitGatewayPeeringItem.requester.region == cdk.Stack.of(this).region
+      ) {
+        Logger.info(
+          `[network-associations-stack] Creating transit gateway peering for tgw ${transitGatewayPeeringItem.requester.transitGatewayName} with accepter tgw ${transitGatewayPeeringItem.accepter.transitGatewayName}`,
+        );
+
+        const requesterTransitGatewayRouteTableId = cdk.aws_ssm.StringParameter.valueForStringParameter(
+          this,
+          `/accelerator/network/transitGateways/${transitGatewayPeeringItem.requester.transitGatewayName}/routeTables/${transitGatewayPeeringItem.requester.routeTableAssociations}/id`,
+        );
+
+        const accepterTransitGatewayId = new SsmParameterLookup(this, 'AccepterTransitGatewayIdLookup', {
+          name: `/accelerator/network/transitGateways/${transitGatewayPeeringItem.accepter.transitGatewayName}/id`,
+          accountId: this.props.accountsConfig.getAccountId(transitGatewayPeeringItem.accepter.account),
+          parameterRegion: transitGatewayPeeringItem.accepter.region,
+          roleName: AcceleratorStack.ACCELERATOR_TGW_PEERING_ROLE_NAME,
+          kmsKey: this.cloudwatchKey,
+          logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays ?? 365,
+        }).value;
+
+        const accepterTransitGatewayRouteTableId = new SsmParameterLookup(
+          this,
+          'AccepterTransitGatewayRouteTableIdLookup',
+          {
+            name: `/accelerator/network/transitGateways/${transitGatewayPeeringItem.accepter.transitGatewayName}/routeTables/${transitGatewayPeeringItem.accepter.routeTableAssociations}/id`,
+            accountId: this.props.accountsConfig.getAccountId(transitGatewayPeeringItem.accepter.account),
+            parameterRegion: transitGatewayPeeringItem.accepter.region,
+            roleName: AcceleratorStack.ACCELERATOR_TGW_PEERING_ROLE_NAME,
+            kmsKey: this.cloudwatchKey,
+            logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays ?? 365,
+          },
+        ).value;
+
+        let requesterTags: cdk.CfnTag[] | undefined;
+
+        if (transitGatewayPeeringItem.requester.tags) {
+          if (transitGatewayPeeringItem.requester.tags.length > 0) {
+            requesterTags = transitGatewayPeeringItem.requester.tags;
+          }
+        }
+
+        const peeringAttachmentId = new TransitGatewayPeering(
+          this,
+          pascalCase(
+            `${transitGatewayPeeringItem.requester.transitGatewayName}-${transitGatewayPeeringItem.accepter.transitGatewayName}-Peering`,
+          ),
+          {
+            requester: {
+              accountName: transitGatewayPeeringItem.requester.account,
+              transitGatewayName: transitGatewayPeeringItem.requester.transitGatewayName,
+              transitGatewayRouteTableId: requesterTransitGatewayRouteTableId,
+              tags: requesterTags,
+            },
+            accepter: {
+              accountId: this.props.accountsConfig.getAccountId(transitGatewayPeeringItem.accepter.account),
+              accountAccessRoleName: AcceleratorStack.ACCELERATOR_TGW_PEERING_ROLE_NAME,
+              region: transitGatewayPeeringItem.accepter.region,
+              transitGatewayName: transitGatewayPeeringItem.accepter.transitGatewayName,
+              transitGatewayId: accepterTransitGatewayId,
+              transitGatewayRouteTableId: accepterTransitGatewayRouteTableId,
+              applyTags: transitGatewayPeeringItem.accepter.applyTags ?? false,
+              autoAccept: transitGatewayPeeringItem.accepter.autoAccept ?? true,
+            },
+            customLambdaLogKmsKey: this.cloudwatchKey,
+            logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays ?? 365,
+          },
+        ).peeringAttachmentId;
+
+        // Create SSM parameter for peering attachment ID
+        this.ssmParameters.push({
+          logicalId: pascalCase(
+            `SsmParam${transitGatewayPeeringItem.requester.transitGatewayName}${transitGatewayPeeringItem.name}PeeringAttachmentId`,
+          ),
+          parameterName: `/accelerator/network/transitGateways/${transitGatewayPeeringItem.requester.transitGatewayName}/peering/${transitGatewayPeeringItem.name}/id`,
+          stringValue: peeringAttachmentId,
+        });
+
+        Logger.info(
+          `[network-associations-stack] Completed transit gateway peering for tgw ${transitGatewayPeeringItem.requester.transitGatewayName} with accepter tgw ${transitGatewayPeeringItem.accepter.transitGatewayName}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Create VPC peering role
+   * @param props
+   */
+  private createVpcPeeringRole(props: AcceleratorStackProps): void {
+    //
+    // Loop through VPC peering entries. Determine if accepter VPC is in external account.
+    // Add VPC peering role to external account IDs if necessary
+    //
+    const vpcPeeringAccountIds: string[] = [];
+    for (const peering of props.networkConfig.vpcPeering ?? []) {
+      // Get requester and accepter VPC configurations
+      const requesterVpc = props.networkConfig.vpcs.filter(item => item.name === peering.vpcs[0]);
+      const accepterVpc = props.networkConfig.vpcs.filter(item => item.name === peering.vpcs[1]);
+      const requesterAccountId = props.accountsConfig.getAccountId(requesterVpc[0].account);
+      const accepterAccountId = props.accountsConfig.getAccountId(accepterVpc[0].account);
+      const crossAccountCondition =
+        accepterAccountId !== requesterAccountId || accepterVpc[0].region !== requesterVpc[0].region;
+
+      // Check for different account peering -- only add IAM role to accepter account
+      if (cdk.Stack.of(this).account === accepterAccountId && cdk.Stack.of(this).region === accepterVpc[0].region) {
+        if (crossAccountCondition && !vpcPeeringAccountIds.includes(requesterAccountId)) {
+          vpcPeeringAccountIds.push(requesterAccountId);
+        }
+      }
+    }
+
+    //
+    // Create VPC peering role
+    //
+    if (vpcPeeringAccountIds.length > 0) {
+      Logger.info(`[network-vpc-stack] Create cross-account IAM role for VPC peering`);
+
+      const principals: cdk.aws_iam.PrincipalBase[] = [];
+      vpcPeeringAccountIds.forEach(accountId => {
+        principals.push(new cdk.aws_iam.AccountPrincipal(accountId));
+      });
+      new cdk.aws_iam.Role(this, 'VpcPeeringRole', {
+        roleName: `AWSAccelerator-VpcPeeringRole-${cdk.Stack.of(this).region}`,
+        assumedBy: new cdk.aws_iam.CompositePrincipal(...principals),
+        inlinePolicies: {
+          default: new cdk.aws_iam.PolicyDocument({
+            statements: [
+              new cdk.aws_iam.PolicyStatement({
+                effect: cdk.aws_iam.Effect.ALLOW,
+                actions: [
+                  'ec2:AcceptVpcPeeringConnection',
+                  'ec2:CreateVpcPeeringConnection',
+                  'ec2:DeleteVpcPeeringConnection',
+                ],
+                resources: [
+                  `arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:vpc/*`,
+                  `arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:vpc-peering-connection/*`,
+                ],
+              }),
+              new cdk.aws_iam.PolicyStatement({
+                effect: cdk.aws_iam.Effect.ALLOW,
+                actions: ['ec2:CreateRoute', 'ec2:DeleteRoute'],
+                resources: [`arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:route-table/*`],
+              }),
+              new cdk.aws_iam.PolicyStatement({
+                effect: cdk.aws_iam.Effect.ALLOW,
+                actions: ['ssm:DeleteParameter', 'ssm:PutParameter'],
+                resources: [
+                  `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter/accelerator/network/vpcPeering/*`,
+                ],
+              }),
+              new cdk.aws_iam.PolicyStatement({
+                effect: cdk.aws_iam.Effect.ALLOW,
+                actions: ['ssm:GetParameter'],
+                resources: [
+                  `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter/accelerator/network/*`,
+                ],
+              }),
+            ],
+          }),
+        },
+      });
+
+      // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
+      // rule suppression with evidence for this permission.
+      NagSuppressions.addResourceSuppressionsByPath(this, `${this.stackName}/VpcPeeringRole/Resource`, [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'VpcPeeringRole needs access to create peering connections for VPCs in the account ',
+        },
+      ]);
+    }
+  }
+
+  /**
+   * Create ACM certificates - check whether ACM should be deployed
+   */
+  private createCertificates() {
+    const certificateMap = new Map<string, CreateCertificate>();
+    Logger.info('[network-vpc-stack] Evaluating AWS Certificate Manager certificates.');
+    for (const certificate of this.props.networkConfig.certificates ?? []) {
+      if (!this.isIncluded(certificate.deploymentTargets)) {
+        Logger.info('[network-vpc-stack] Item excluded');
+        continue;
+      }
+      Logger.info(
+        `[network-vpc-stack] Account (${cdk.Stack.of(this).account}) should be included, deploying ACM certificates.`,
+      );
+      const certificateResource = this.createAcmCertificates(certificate);
+      certificateMap.set(certificate.name, certificateResource);
+    }
+
+    return certificateMap;
+  }
+  /**
+   * Create ACM certificates
+   */
+  private createAcmCertificates(certificate: CertificateConfig) {
+    const resourceName = pascalCase(`${certificate.name}`);
+
+    const acmCertificate = new CreateCertificate(this, resourceName, {
+      name: certificate.name,
+      type: certificate.type,
+      privKey: certificate.privKey,
+      cert: certificate.cert,
+      chain: certificate.chain,
+      validation: certificate.validation,
+      domain: certificate.domain,
+      san: certificate.san,
+      cloudWatchLogsKmsKey: this.cloudwatchKey,
+      logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
+      homeRegion: this.props.globalConfig.homeRegion,
+      managementAccountId: this.props.accountsConfig.getManagementAccountId(),
+    });
+
+    // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission
+    // rule suppression with evidence for this permission.
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `${this.stackName}/${resourceName}/AssetsRole/Policy/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'Policy permissions are part of managed role and rest is to get access from s3 bucket',
+        },
+      ],
+    );
+
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `${this.stackName}/${resourceName}/Custom::CreateAcmCerts/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'Policy permissions are part cdk provider framework',
+        },
+      ],
+    );
+    // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+    // rule suppression with evidence for this permission.
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `${this.stackName}/${resourceName}/Function/ServiceRole/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'IAM Role for lambda needs AWS managed policy',
+        },
+      ],
+    );
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `${this.stackName}/${resourceName}/Custom::CreateAcmCerts/framework-onEvent/ServiceRole/Resource`,
+      [
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'IAM Role created by custom resource framework',
+        },
+      ],
+    );
+
+    return acmCertificate;
   }
 }

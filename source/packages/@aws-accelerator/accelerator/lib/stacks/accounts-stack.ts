@@ -12,13 +12,20 @@
  */
 
 import * as cdk from 'aws-cdk-lib';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { NagSuppressions } from 'cdk-nag';
 import { pascalCase } from 'change-case';
 import { Construct } from 'constructs';
 import * as path from 'path';
-
-import * as iam from 'aws-cdk-lib/aws-iam';
-import { EnablePolicyType, Policy, PolicyAttachment, PolicyType, PolicyTypeEnum } from '@aws-accelerator/constructs';
+import {
+  EnablePolicyType,
+  Policy,
+  PolicyAttachment,
+  PolicyType,
+  PolicyTypeEnum,
+  MoveAccountRule,
+  RevertScpChanges,
+} from '@aws-accelerator/constructs';
 
 import { Logger } from '../logger';
 import { AcceleratorStack, AcceleratorStackProps } from './accelerator-stack';
@@ -74,7 +81,8 @@ export class AccountsStack extends AcceleratorStack {
         }),
       );
 
-      new cdk.aws_ssm.StringParameter(this, 'AcceleratorCloudWatchKmsArnParameter', {
+      this.ssmParameters.push({
+        logicalId: 'AcceleratorCloudWatchKmsArnParameter',
         parameterName: AcceleratorStack.ACCELERATOR_CLOUDWATCH_LOG_KEY_ARN_PARAMETER_NAME,
         stringValue: this.cloudwatchKey.keyArn,
       });
@@ -100,7 +108,8 @@ export class AccountsStack extends AcceleratorStack {
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       });
 
-      new cdk.aws_ssm.StringParameter(this, 'AcceleratorLambdaKmsArnParameter', {
+      this.ssmParameters.push({
+        logicalId: 'AcceleratorLambdaKmsArnParameter',
         parameterName: AcceleratorStack.ACCELERATOR_LAMBDA_KEY_ARN_PARAMETER_NAME,
         stringValue: this.lambdaKey.keyArn,
       });
@@ -110,6 +119,53 @@ export class AccountsStack extends AcceleratorStack {
     // Global Organizations actions
     //
     if (props.globalRegion === cdk.Stack.of(this).region) {
+      if (props.organizationConfig.enable && !props.globalConfig.controlTower.enable) {
+        new MoveAccountRule(this, 'MoveAccountRule', {
+          globalRegion: props.globalRegion,
+          homeRegion: props.globalConfig.homeRegion,
+          moveAccountRoleName: AcceleratorStack.ACCELERATOR_ACCOUNT_CONFIG_TABLE_PARAMETER_ACCESS_ROLE_NAME,
+          commitId: props.configCommitId ?? '',
+          kmsKey: this.cloudwatchKey,
+          logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
+        });
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/MoveAccountRule/MoveAccountRole/Policy/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason: 'AWS Custom resource provider role created by cdk.',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/MoveAccountRule/MoveAccountTargetFunction/ServiceRole/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM4',
+              reason: 'AWS Custom resource provider role created by cdk.',
+            },
+          ],
+        );
+
+        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions.
+        NagSuppressions.addResourceSuppressionsByPath(
+          this,
+          `${this.stackName}/MoveAccountRule/MoveAccountTargetFunction/ServiceRole/DefaultPolicy/Resource`,
+          [
+            {
+              id: 'AwsSolutions-IAM5',
+              reason: 'AWS Custom resource provider role created by cdk.',
+            },
+          ],
+        );
+      }
+
       if (props.organizationConfig.enable) {
         let quarantineScpId = '';
         // SCP is not supported in China Region.
@@ -117,7 +173,7 @@ export class AccountsStack extends AcceleratorStack {
           const enablePolicyTypeScp = new EnablePolicyType(this, 'enablePolicyTypeScp', {
             policyType: PolicyTypeEnum.SERVICE_CONTROL_POLICY,
             kmsKey: this.cloudwatchKey,
-            logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
+            logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
           });
 
           // Deploy SCPs
@@ -127,12 +183,11 @@ export class AccountsStack extends AcceleratorStack {
             const scp = new Policy(this, serviceControlPolicy.name, {
               description: serviceControlPolicy.description,
               name: serviceControlPolicy.name,
-              path: path.join(props.configDirPath, serviceControlPolicy.policy),
+              partition: props.partition,
+              path: this.generatePolicyReplacements(path.join(props.configDirPath, serviceControlPolicy.policy), true),
               type: PolicyType.SERVICE_CONTROL_POLICY,
               kmsKey: this.cloudwatchKey,
               logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
-              acceleratorPrefix: 'AWSAccelerator',
-              managementAccountAccessRole: props.globalConfig.managementAccountAccessRole,
             });
             scp.node.addDependency(enablePolicyTypeScp);
 
@@ -140,7 +195,8 @@ export class AccountsStack extends AcceleratorStack {
               serviceControlPolicy.name == props.organizationConfig.quarantineNewAccounts?.scpPolicyName &&
               props.partition == 'aws'
             ) {
-              new cdk.aws_ssm.StringParameter(this, pascalCase(`SsmParam${scp.name}ScpPolicyId`), {
+              this.ssmParameters.push({
+                logicalId: pascalCase(`SsmParam${scp.name}ScpPolicyId`),
                 parameterName: `/accelerator/organizations/scp/${scp.name}/id`,
                 stringValue: scp.id,
               });
@@ -203,7 +259,24 @@ export class AccountsStack extends AcceleratorStack {
           });
         }
 
-        if (props.organizationConfig.quarantineNewAccounts?.enable === true && props.partition == 'aws') {
+        if (props.securityConfig.centralSecurityServices?.scpRevertChangesConfig?.enable) {
+          Logger.info(`[accounts-stack] Creating resources to revert modifications to scps`);
+          new RevertScpChanges(this, 'RevertScpChanges', {
+            auditAccountId: props.accountsConfig.getAuditAccountId(),
+            logArchiveAccountId: props.accountsConfig.getLogArchiveAccountId(),
+            managementAccountId: props.accountsConfig.getManagementAccountId(),
+            configDirPath: props.configDirPath,
+            homeRegion: props.globalConfig.homeRegion,
+            kmsKeyCloudWatch: this.cloudwatchKey,
+            kmsKeyLambda: this.lambdaKey,
+            logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
+            managementAccountAccessRole: props.globalConfig.managementAccountAccessRole,
+            snsTopicName: props.securityConfig.centralSecurityServices.scpRevertChangesConfig?.snsTopicName,
+            scpFilePaths: props.organizationConfig.serviceControlPolicies?.map(a => a.policy) ?? [],
+          });
+        }
+
+        if (props.organizationConfig.quarantineNewAccounts?.enable === true && props.partition === 'aws') {
           // Create resources to attach quarantine scp to
           // new accounts created in organizations
           Logger.info(`[accounts-stack] Creating resources to quarantine new accounts`);
@@ -233,7 +306,9 @@ export class AccountsStack extends AcceleratorStack {
             handler: 'index.handler',
             description: 'Lambda function to attach quarantine scp to new accounts',
             timeout: cdk.Duration.minutes(5),
-            environment: { SCP_POLICY_NAME: props.organizationConfig.quarantineNewAccounts?.scpPolicyName ?? '' },
+            environment: {
+              SCP_POLICY_NAME: props.organizationConfig.quarantineNewAccounts?.scpPolicyName ?? '',
+            },
             environmentEncryption: this.lambdaKey,
             initialPolicy: [orgPolicyRead, orgPolicyWrite],
           });
@@ -316,6 +391,12 @@ export class AccountsStack extends AcceleratorStack {
         }
       }
     }
+
+    //
+    // Create SSM parameters
+    //
+    this.createSsmParameters();
+
     Logger.info('[accounts-stack] Completed stack synthesis');
   }
 }

@@ -57,7 +57,7 @@ export class SecurityAuditStack extends AcceleratorStack {
 
     this.centralLogsBucketName = `${
       AcceleratorStack.ACCELERATOR_CENTRAL_LOGS_BUCKET_NAME_PREFIX
-    }-${props.accountsConfig.getLogArchiveAccountId()}-${props.globalConfig.homeRegion}`;
+    }-${props.accountsConfig.getLogArchiveAccountId()}-${props.centralizedLoggingRegion}`;
 
     this.s3Key = new KeyLookup(this, 'AcceleratorS3Key', {
       accountId: props.accountsConfig.getAuditAccountId(),
@@ -77,7 +77,7 @@ export class SecurityAuditStack extends AcceleratorStack {
 
     this.centralLogsBucketKey = new KeyLookup(this, 'CentralLogsBucketKey', {
       accountId: props.accountsConfig.getLogArchiveAccountId(),
-      keyRegion: props.globalConfig.homeRegion,
+      keyRegion: props.centralizedLoggingRegion,
       roleName: CentralLogsBucket.CROSS_ACCOUNT_SSM_PARAMETER_ACCESS_ROLE_NAME,
       keyArnParameterName: CentralLogsBucket.KEY_ARN_PARAMETER_NAME,
       logRetentionInDays: props.globalConfig.cloudwatchLogRetentionInDays,
@@ -141,77 +141,11 @@ export class SecurityAuditStack extends AcceleratorStack {
     this.configureControlTowerNotification();
 
     //
-    // CloudTrail Logs Bucket Creation
+    // Create SSM Parameters
     //
-    this.createCloudTrailLogsBucket();
+    this.createSsmParameters();
 
     Logger.info('[security-audit-stack] Completed stack synthesis');
-  }
-
-  private createCloudTrailLogsBucket() {
-    Logger.info(`[security-audit-stack] CloudTrail Logging S3 Bucket`);
-
-    const bucket = new Bucket(this, 'AcceleratorCloudTrailBucket', {
-      encryptionType: BucketEncryptionType.SSE_KMS,
-      s3BucketName: `${AcceleratorStack.ACCELERATOR_CLOUDTRAIL_BUCKET_NAME_PREFIX}-${cdk.Aws.ACCOUNT_ID}-${cdk.Aws.REGION}`,
-      kmsKey: this.s3Key,
-      serverAccessLogsBucketName: `${AcceleratorStack.ACCELERATOR_S3_ACCESS_LOGS_BUCKET_NAME_PREFIX}-${cdk.Aws.ACCOUNT_ID}-${cdk.Aws.REGION}`,
-      s3LifeCycleRules: this.getS3LifeCycleRules(this.props.globalConfig.logging.cloudtrail.lifecycleRules),
-      replicationProps: this.replicationProps,
-    });
-
-    new cdk.aws_ssm.StringParameter(this, 'SsmParamOrganizationCloudTrailLogBucketName', {
-      parameterName: AcceleratorStack.ACCELERATOR_CLOUDTRAIL_BUCKET_NAME_PARAMETER_NAME,
-      stringValue: bucket.getS3Bucket().bucketName,
-    });
-
-    // Grant cloudtrail access to the bucket
-    bucket.getS3Bucket().grantReadWrite(new cdk.aws_iam.ServicePrincipal('cloudtrail.amazonaws.com'));
-
-    // Grant organization principals to use the bucket
-    bucket.getS3Bucket().addToResourcePolicy(
-      new cdk.aws_iam.PolicyStatement({
-        sid: 'Allow Organization principals to use of the bucket',
-        effect: cdk.aws_iam.Effect.ALLOW,
-        actions: ['s3:GetBucketLocation', 's3:PutObject', 's3:PutObjectAcl'],
-        principals: [new cdk.aws_iam.AnyPrincipal()],
-        resources: [bucket.getS3Bucket().bucketArn, `${bucket.getS3Bucket().bucketArn}/*`],
-        conditions: {
-          StringEquals: {
-            ...this.getPrincipalOrgIdCondition(this.organizationId),
-          },
-        },
-      }),
-    );
-
-    bucket.getS3Bucket().addToResourcePolicy(
-      new cdk.aws_iam.PolicyStatement({
-        sid: 'Allow Organization principals to get encryption context',
-        effect: cdk.aws_iam.Effect.ALLOW,
-        actions: ['s3:GetEncryptionConfiguration'],
-        principals: [new cdk.aws_iam.AnyPrincipal()],
-        resources: [`${bucket.getS3Bucket().bucketArn}`],
-        conditions: {
-          StringEquals: {
-            ...this.getPrincipalOrgIdCondition(this.organizationId),
-          },
-        },
-      }),
-    );
-
-    // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
-    NagSuppressions.addResourceSuppressionsByPath(
-      this,
-      `/${this.stackName}/AcceleratorCloudTrailBucket/AcceleratorCloudTrailBucketReplication/` +
-        pascalCase(this.centralLogsBucketName) +
-        '-ReplicationRole/DefaultPolicy/Resource',
-      [
-        {
-          id: 'AwsSolutions-IAM5',
-          reason: 'Allows only specific policy.',
-        },
-      ],
-    );
   }
 
   /**
@@ -261,6 +195,8 @@ export class SecurityAuditStack extends AcceleratorStack {
 
         const guardDutyMembers = new GuardDutyMembers(this, 'GuardDutyMembers', {
           enableS3Protection: this.props.securityConfig.centralSecurityServices.guardduty.s3Protection.enable,
+          enableEksProtection:
+            this.props.securityConfig.centralSecurityServices.guardduty.eksProtection?.enable ?? false,
           kmsKey: this.cloudwatchKey,
           logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
         });
@@ -275,6 +211,8 @@ export class SecurityAuditStack extends AcceleratorStack {
               this.props.securityConfig.centralSecurityServices.guardduty.exportConfiguration.exportFrequency ??
               'FIFTEEN_MINUTES',
             enableS3Protection: this.props.securityConfig.centralSecurityServices.guardduty.s3Protection.enable,
+            enableEksProtection:
+              this.props.securityConfig.centralSecurityServices.guardduty.eksProtection?.enable ?? false,
             kmsKey: this.cloudwatchKey,
             logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
           }).node.addDependency(guardDutyMembers);
@@ -334,7 +272,8 @@ export class SecurityAuditStack extends AcceleratorStack {
         ],
       );
 
-      new cdk.aws_ssm.StringParameter(this, 'SsmParamOrganizationAuditManagerPublishingDestinationBucketArn', {
+      this.ssmParameters.push({
+        logicalId: 'SsmParamOrganizationAuditManagerPublishingDestinationBucketArn',
         parameterName: '/accelerator/organization/security/auditManager/publishing-destination/bucket-arn',
         stringValue: bucket.getS3Bucket().bucketArn,
       });
@@ -516,6 +455,24 @@ export class SecurityAuditStack extends AcceleratorStack {
         enableKeyRotation: true,
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       });
+      if (this.props.organizationConfig.enable) {
+        snsKey.addToResourcePolicy(
+          new cdk.aws_iam.PolicyStatement({
+            sid: `Allow Accelerator Role to use the encryption key`,
+            principals: [new cdk.aws_iam.AnyPrincipal()],
+            actions: ['kms:Encrypt', 'kms:Decrypt', 'kms:ReEncrypt*', 'kms:GenerateDataKey*', 'kms:DescribeKey'],
+            resources: ['*'],
+            conditions: {
+              StringEquals: {
+                ...this.getPrincipalOrgIdCondition(this.organizationId),
+              },
+              ArnLike: {
+                'aws:PrincipalARN': [`arn:${cdk.Stack.of(this).partition}:iam::*:role/AWSAccelerator-*`],
+              },
+            },
+          }),
+        );
+      }
     }
 
     // Loop through all the subscription entries
